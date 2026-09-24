@@ -576,9 +576,18 @@ cp .vscode/azure_sql.env.sample .vscode/azure_sql.env   # gitignored — fill it
 PYTHONPATH=. python3 scripts/azure_sql_connect.py --env-file .vscode/azure_sql.env
 ```
 
-To step through it in VS Code, use the **Azure SQL probe (env file)** launch
-configuration in `.vscode/launch.json`, which reads `.vscode/azure_sql.env` and
-pins the interpreter that has `pymssql` installed.
+To step through it in VS Code, copy the launch configurations first — the real
+`launch.json` is gitignored, since it holds your own workspace's profile and
+Lakebase coordinates:
+
+```bash
+cp .vscode/launch.json.sample .vscode/launch.json   # gitignored — fill in the <placeholders>
+```
+
+That gives you four configurations: the FastAPI backend under `debugpy`, Chrome
+against the Vite dev server, `pytest` on the current file, and **Azure SQL probe
+(env file)**, which reads `.vscode/azure_sql.env` and pins the interpreter that
+has `pymssql` installed.
 
 ## Roadmap
 

@@ -50,3 +50,4 @@ frontend/tsconfig.tsbuildinfo
 # tracked. Vite projects add tsconfig.node.json / tsconfig.app.json too.
 !tsconfig*.json
 .idea/
+.vscode/launch.json
