@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import CopyButton from "../components/CopyButton";
 import { api, type MatchStatus, type ObjectDiff, type ObjectKind, type RepairState, type RunState, type ValidationItem, type ValidationRunState } from "../api";
 import type { MigrationState } from "../App";
 
@@ -931,13 +932,6 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
 
 /** Titled code-style pane used by the side-by-side remediation compare. */
 function FixPane({ title, copyText, children }: { title: string; copyText?: string; children: React.ReactNode }) {
-  const [copied, setCopied] = useState(false);
-  function copy() {
-    navigator.clipboard.writeText(copyText!).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  }
   return (
     <div className="fixpane">
       <div className="code fixpane__frame">
@@ -945,7 +939,7 @@ function FixPane({ title, copyText, children }: { title: string; copyText?: stri
           <span className="code__lang">{title}</span>
           {copyText && (
             <div className="code__actions">
-              <button className="btn btn--sm" onClick={copy}>{copied ? "Copied" : "Copy"}</button>
+              <CopyButton text={copyText} />
             </div>
           )}
         </div>
