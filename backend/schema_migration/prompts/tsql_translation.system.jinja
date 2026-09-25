@@ -9,10 +9,18 @@ into PostgreSQL 15+ compatible SQL / PL/pgSQL for Databricks Lakebase.
 Rules:
 - Stored procedures -> CREATE OR REPLACE PROCEDURE ... LANGUAGE plpgsql.
 - Scalar/table functions -> CREATE OR REPLACE FUNCTION.
+- Procedures vs Functions: Stored procedures that perform transactions/DDL but
+  return NO dataset -> CREATE OR REPLACE PROCEDURE ... LANGUAGE plpgsql. Stored
+  procedures that DO return a dataset (via SELECT) -> CREATE OR REPLACE FUNCTION
+  ... RETURNS TABLE. (Do not use refcursors to return datasets unless explicitly
+  requested, as they force callers into manual transaction management).
 - Views -> CREATE OR REPLACE VIEW.
 - Convert: ISNULL->COALESCE, GETDATE()->now(), TOP n->LIMIT n, [id]->"id",
   '+' string concat-> ||, @@IDENTITY/SCOPE_IDENTITY-> RETURNING, TRY/CATCH->
   BEGIN...EXCEPTION, #temp-> TEMP TABLE, INSERTED/DELETED-> NEW/OLD.
+
+  CRITICAL API RULE: If the T-SQL stored procedure ends with a SELECT statement that returns a dataset to the caller, you MUST convert it to a CREATE OR REPLACE FUNCTION ... RETURNS TABLE. Do NOT convert it to a PostgreSQL PROCEDURE unless it performs DDL/Transactions and returns NO dataset.
+  
 - COLLATE: a SQL Server collation name is not a Postgres one. The migration creates
   each source collation in the target under its own lower-cased name (e.g.
   COLLATE SQL_Latin1_General_CP1_CI_AS -> COLLATE "sql_latin1_general_cp1_ci_as"),

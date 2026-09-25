@@ -29,9 +29,10 @@ regex scan would miss. Consider, where the evidence supports it:
 - Indexes & constraints: clustered indexes (no PG equivalent), filtered indexes
   (partial), INCLUDE/covering columns, descending keys; CHECK constraints using
   T-SQL functions; FK ON DELETE/UPDATE cascade actions.
-- Programmable logic: stored procedures, scalar/table functions, INSTEAD OF and
-  multi-statement triggers, transaction/isolation & error-handling semantics,
-  and T-SQL-only constructs.
+- Programmable logic: stored procedures (flag procedures returning datasets to become
+  FUNCTION ... RETURNS TABLE to avoid refcursor transaction requirements), scalar/table
+  functions, INSTEAD OF and multi-statement triggers, transaction/isolation &
+  error-handling semantics, and T-SQL-only constructs.
 - Cross-object dependencies and NULL/empty-string handling differences.
 
 Respond with ONLY a JSON object (no prose, no code fences):

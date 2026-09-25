@@ -94,7 +94,7 @@ def test_system_prompt_renders_from_its_template():
     prompt = ai_translator._system_prompt()
     assert prompt.startswith("You are a senior database migration engineer.")
     assert "{#" not in prompt and "{{" not in prompt  # no unrendered Jinja
-    for rule in ("CREATE OR REPLACE PROCEDURE", "CREATE OR REPLACE VIEW", "COLLATE"):
+    for rule in ("CREATE OR REPLACE PROCEDURE", "RETURNS TABLE", "CREATE OR REPLACE VIEW", "COLLATE"):
         assert rule in prompt
 
 
