@@ -81,6 +81,14 @@ DELIBERATE_TRADES = [
     "visibly when applied, rather than being guessed at and silently changing "
     "meaning. A predicate reported as passed through is a prompt to review it, not "
     "evidence the translation was lossy.",
+    "Scratch collections (`#temp`, `##temp`, `DECLARE @t TABLE`) were rewritten as CTEs "
+    "or PL/pgSQL records/arrays, not as Postgres temp tables — and application code must "
+    "not reintroduce them. Lakebase pools connections in transaction mode, which cannot "
+    "be changed, and session-held temporary tables are unsupported on that endpoint: one "
+    "that outlives its transaction is gone, or belongs to another client's backend. A "
+    "collection that genuinely needs a relation is listed in the gaps with what it needs "
+    "instead (an UNLOGGED table keyed by a run id); everything else belongs in the "
+    "statement that reads it.",
     "Postgres caps timestamp/time precision at microseconds, so `datetime2(7)` "
     "became bare `timestamp`. The 100-nanosecond tail is gone by design — "
     "`timestamp(7)` is rejected outright by Postgres.",
@@ -195,8 +203,16 @@ _APP_REWRITES: dict[str, tuple[str, str]] = {
         "length / position / date_part / interval arithmetic / overlay — argument order differs, check each call",
     ),
     "MERGE": ("MERGE INTO ... USING", "INSERT ... ON CONFLICT DO UPDATE (Postgres also supports MERGE from 15)"),
-    "TEMP_TABLE": ("#temp", "CREATE TEMP TABLE, or a CTE"),
-    "TABLE_VARIABLE": ("DECLARE @t TABLE", "a TEMP TABLE, array, or CTE"),
+    "TEMP_TABLE": (
+        "#temp / ##temp",
+        "a CTE, or a PL/pgSQL record/array — NOT a Postgres TEMP TABLE, which the pooled "
+        "endpoint does not support (see the deliberate trades)",
+    ),
+    "TABLE_VARIABLE": (
+        "DECLARE @t TABLE",
+        "a CTE for a single statement, or an array of a composite type with unnest() across "
+        "several — NOT a Postgres TEMP TABLE (see the deliberate trades)",
+    ),
     "DYNAMIC_SQL": ("EXEC / sp_executesql", "parameterised SQL from the application, or EXECUTE ... USING in PL/pgSQL"),
     "TRY_CATCH": ("BEGIN TRY / BEGIN CATCH", "the driver's exception handling, or BEGIN ... EXCEPTION WHEN in PL/pgSQL"),
     "RAISERROR": ("RAISERROR / THROW", "RAISE EXCEPTION — the application sees a SQLSTATE, not an error number"),

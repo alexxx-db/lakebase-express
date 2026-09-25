@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from backend.assessment.models import AssessmentReport, Severity, TableInfo
+from backend.assessment.temp_objects import KIND_RULE_IDS
 from backend.context_bundle import rules
 from backend.context_bundle.models import (
     BUNDLE_VERSION,
@@ -563,16 +564,32 @@ def _sections(bundle_parts: dict, omitted: dict[str, int]) -> list[SectionIndex]
     ] if bundle_parts.get("ai_notes") else [])
 
 
-def _operational(columns: Iterable[ColumnContract]) -> OperationalContract:
+def _rewrote_scratch(report: AssessmentReport | None) -> bool:
+    """Whether any `#temp` / `@t TABLE` in the source was rewritten.
+
+    The rewrite *rules* ship either way — application code can use a construct the
+    database objects never did — but the trade is about a decision, so it needs one
+    to have been made.
+    """
+    rule_ids = set(KIND_RULE_IDS.values())
+    return bool(report) and any(f.rule_id in rule_ids for f in report.findings)
+
+
+def _operational(
+    columns: Iterable[ColumnContract], *, rewrote_scratch: bool
+) -> OperationalContract:
     """Static runtime guidance, with the trades that actually apply.
 
-    The collation trade is only included when a nondeterministic collation was
-    really emitted — otherwise it is advice about a decision this migration never
-    made.
+    A trade ships only when this migration really made that decision: the collation
+    trade needs a nondeterministic collation to have been emitted, and the
+    scratch-collection trade needs a temp table or table variable to have been
+    rewritten. Otherwise it is advice about a decision that was never made.
     """
     trades = list(rules.DELIBERATE_TRADES)
     if not any(c.rejects_pattern_match for c in columns):
         trades = [t for t in trades if "Collations are mirrored" not in t]
+    if not rewrote_scratch:
+        trades = [t for t in trades if "Scratch collections" not in t]
     return OperationalContract(
         transient_sqlstates=rules.TRANSIENT_SQLSTATE_LIST,
         retry_note=rules.RETRY_NOTE,
@@ -649,6 +666,6 @@ def build_bundle(
         expressions=expressions,
         rewrite_rules=parts["rewrite_rules"],
         gaps=parts["gaps"],
-        operational=_operational(columns),
+        operational=_operational(columns, rewrote_scratch=_rewrote_scratch(report)),
         ai_notes=ai_notes,
     )

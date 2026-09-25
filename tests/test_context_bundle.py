@@ -161,8 +161,35 @@ def test_collation_trade_is_left_out_when_no_column_needs_it():
 
     assert bundle.columns == []
     assert not any("Collations are mirrored" in t for t in bundle.operational.deliberate_trades)
-    # The other trades are unconditional.
+    # Neither conditional trade applies here; the rest are unconditional.
+    assert not any("Scratch collections" in t for t in bundle.operational.deliberate_trades)
     assert len(bundle.operational.deliberate_trades) == 2
+
+
+# --- Scratch collections: the trade, and the rule that ships either way ------------
+
+
+def test_scratch_collection_trade_ships_when_a_temp_table_was_rewritten():
+    finding = Finding(
+        rule_id="TEMP_TABLE", title="Temp table (#table) → fold into a CTE",
+        severity=Severity.MEDIUM, object_name="dbo.usp_Report (PROCEDURE)",
+        detail="#stage", recommendation="Fold it into the statement that reads it.",
+    )
+    bundle = build_bundle(_project(report=_report(findings=[finding])))
+
+    trade = next(t for t in bundle.operational.deliberate_trades if "Scratch collections" in t)
+    assert "must not reintroduce them" in trade
+
+
+def test_the_temp_table_rewrite_rule_ships_even_when_no_object_used_one():
+    """Application code can use a construct the database objects never did, so the
+    rule is always listed — only `seen_in_source` says whether this database proved it."""
+    bundle = build_bundle(_project(report=_report()))
+
+    rule = next(r for r in bundle.rewrite_rules if r.tsql.startswith("#temp"))
+    assert rule.seen_in_source is False
+    assert "NOT a Postgres TEMP TABLE" in rule.postgres
+    assert not any("Scratch collections" in t for t in bundle.operational.deliberate_trades)
 
 
 # --- The expression join ----------------------------------------------------------

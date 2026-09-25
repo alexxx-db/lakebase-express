@@ -8,8 +8,9 @@ surrounding prose) for endpoints that don't honor it, and never lets a malformed
 JSON blob through as SQL.
 
 The system prompt is a Jinja template in ``./prompts`` (see backend/prompts.py) so
-the translation rules can be tuned as prose. The user message stays in Python: it is
-per-object logic — schema mapping and trigger naming.
+the translation rules can be tuned as prose. The user message stays in Python: it
+is per-object logic — schema mapping, trigger naming, and the scratch-collection
+decisions from assessment/temp_objects.
 """
 from __future__ import annotations
 
@@ -23,6 +24,12 @@ from typing import Callable
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
 from backend.assessment.models import ProgrammableObject
+from backend.assessment.temp_objects import (
+    REWRITES,
+    Strategy,
+    analyze,
+    temp_table_regression,
+)
 from backend.config import FM_ENDPOINT
 from backend.fm_params import chat_text, query_chat
 from backend.prompts import render
@@ -78,6 +85,28 @@ _RESPONSE_FORMAT = {
 _MAX_OUTPUT_TOKENS = 128000
 
 
+def _temp_guidance(definition: str) -> str:
+    """Per-collection instructions for the scratch tables in this body.
+
+    The same analysis the assessment ran, so the model is told to do exactly what
+    the user was told would happen. Row counts are not passed: sizing escalates a
+    finding for a human, and a model handed a row count would quietly decide the
+    rewrite instead of flagging it.
+    """
+    usages = analyze(definition)
+    if not usages:
+        return ""
+    lines = [f"  - {u.summary}" for u in usages]
+    wanted = {u.strategy for u in usages}
+    how = "\n".join(f"  {REWRITES[s]}" for s in Strategy if s in wanted)
+    return (
+        "This body uses scratch collections. Rewrite each one as shown — none of them "
+        "may become a Postgres TEMP TABLE:\n"
+        + "\n".join(lines)
+        + f"\n\nHow to apply those:\n{how}\n\n"
+    )
+
+
 def _build_user_prompt(
     obj: ProgrammableObject,
     schema_map: dict[str, str] | None = None,
@@ -122,8 +151,9 @@ def _build_user_prompt(
                 f"using this schema mapping: {pairs}.\n\n"
             )
     return (
-        f"{guidance}Translate this T-SQL {obj.object_type.lower()} named "
-        f'"{obj.schema_name}.{obj.object_name}":\n\n{obj.definition}'
+        f"{guidance}{_temp_guidance(obj.definition)}Translate this T-SQL "
+        f'{obj.object_type.lower()} named "{obj.schema_name}.{obj.object_name}":'
+        f"\n\n{obj.definition}"
     )
 
 
@@ -210,13 +240,20 @@ def translate_object(
         # hand-edited plan is corrected regardless of when it was built.
         if obj.object_type.upper() == "TRIGGER":
             translated = sanitize_trigger_sql(translated)
+        # Not rewritten, only reported: a temp table the prompt forbade is still
+        # applicable SQL, but it breaks on the pooled endpoint and the reviewer has
+        # to be told rather than left to notice.
+        notes = payload["notes"]
+        regression = temp_table_regression(obj.definition, translated)
+        if regression:
+            notes = f"{notes.rstrip()}\n\n{regression}" if notes.strip() else regression
         return Translation(
             object_name=name,
             object_type=obj.object_type,
             original=obj.definition,
             translated=translated,
             reasoning=payload["reasoning"],
-            notes=payload["notes"],
+            notes=notes,
             success=True,
         )
     except Exception as exc:  # one bad object shouldn't fail the batch
