@@ -14,20 +14,18 @@ are, so a reader always knows which model wrote them.
 """
 from __future__ import annotations
 
-import functools
 import json
 import logging
 import re
-from pathlib import Path
 
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
-from jinja2 import Environment, FileSystemLoader
 
 from backend.config import FM_ENDPOINT
 from backend.context_bundle.models import AiNotes, AiObjectNote
 from backend.fm_params import chat_text, query_chat
 from backend.migration.models import ObjectKind, PlanItem
 from backend.projects.models import Project
+from backend.prompts import render
 
 log = logging.getLogger("lakebase_express.context_ai_notes")
 
@@ -73,21 +71,9 @@ _RESPONSE_FORMAT = {
     },
 }
 
-_PROMPT_DIR = Path(__file__).parent / "prompts"
-
-
-@functools.lru_cache(maxsize=1)
-def _jinja_env() -> Environment:
-    return Environment(
-        loader=FileSystemLoader(str(_PROMPT_DIR)),
-        autoescape=False,  # prompts are plain text, not HTML
-        trim_blocks=True,
-        lstrip_blocks=True,
-    )
-
 
 def _system_prompt() -> str:
-    return _jinja_env().get_template("app_migration_notes.system.jinja").render().strip()
+    return render(__file__, "app_migration_notes.system.jinja")
 
 
 def code_items(project: Project) -> list[PlanItem]:

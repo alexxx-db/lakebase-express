@@ -6,6 +6,10 @@ Structured output (``response_format`` json_schema) constrains the reply to
 {"reasoning", "translated", "notes"}; the parse is still defensive (code fences,
 surrounding prose) for endpoints that don't honor it, and never lets a malformed
 JSON blob through as SQL.
+
+The system prompt is a Jinja template in ``./prompts`` (see backend/prompts.py) so
+the translation rules can be tuned as prose. The user message stays in Python: it is
+per-object logic — schema mapping and trigger naming.
 """
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 from backend.assessment.models import ProgrammableObject
 from backend.config import FM_ENDPOINT
 from backend.fm_params import chat_text, query_chat
+from backend.prompts import render
 from backend.schema_migration.models import Translation
 from backend.schema_migration.naming import (
     IdentifierCase,
@@ -31,37 +36,10 @@ from backend.schema_migration.trigger_sql import sanitize_trigger_sql
 
 log = logging.getLogger("lakebase_express.ai_translator")
 
-_SYSTEM_PROMPT = """You are a senior database migration engineer. You convert \
-Microsoft T-SQL (Azure SQL) into PostgreSQL 15+ compatible SQL / PL/pgSQL for \
-Databricks Lakebase.
 
-Rules:
-- Stored procedures -> CREATE OR REPLACE PROCEDURE ... LANGUAGE plpgsql.
-- Scalar/table functions -> CREATE OR REPLACE FUNCTION.
-- Views -> CREATE OR REPLACE VIEW.
-- Convert: ISNULL->COALESCE, GETDATE()->now(), TOP n->LIMIT n, [id]->"id",
-  '+' string concat-> ||, @@IDENTITY/SCOPE_IDENTITY-> RETURNING, TRY/CATCH->
-  BEGIN...EXCEPTION, #temp-> TEMP TABLE, INSERTED/DELETED-> NEW/OLD.
-- COLLATE: a SQL Server collation name is not a Postgres one. The migration creates
-  each source collation in the target under its own lower-cased name (e.g.
-  COLLATE SQL_Latin1_General_CP1_CI_AS -> COLLATE "sql_latin1_general_cp1_ci_as"),
-  so keep the clause and just requote the name that way. A binary collation
-  (_BIN/_BIN2) becomes COLLATE "C". Note that case-insensitive collations are
-  nondeterministic in Postgres, so LIKE/regex against such a column is rejected.
-  If the source code pattern-matches one, put an explicit deterministic collation on
-  the operand: col COLLATE "C" ILIKE '...' keeps the case-insensitive result. Do NOT
-  use lower(col) LIKE lower(...) — lower()'s result inherits the column collation and
-  is rejected the same way. Say what you changed in notes.
-- If a construct has no faithful equivalent, keep best-effort code and explain in notes.
-- "translated" must contain ONLY executable PostgreSQL / PL-pgSQL — never prose,
-  markdown fences, or JSON.
+def _system_prompt() -> str:
+    return render(__file__, "tsql_translation.system.jinja")
 
-Respond with ONLY a JSON object with these keys, in this order:
-  "reasoning": a short step-by-step explanation (2-5 sentences) of how you analyzed
-               the source and the key T-SQL -> Postgres decisions you made;
-  "translated": the Postgres SQL;
-  "notes": brief migration caveats the reviewer must check.
-Think through "reasoning" first, then produce "translated"."""
 
 # Structured output schema: the endpoint is constrained to emit exactly
 # {"reasoning", "translated", "notes"}. Without it, models pretty-print the JSON
@@ -195,7 +173,7 @@ def translate_object(
         resp = query_chat(
             endpoint,
             messages=[
-                ChatMessage(role=ChatMessageRole.SYSTEM, content=_SYSTEM_PROMPT),
+                ChatMessage(role=ChatMessageRole.SYSTEM, content=_system_prompt()),
                 ChatMessage(
                     role=ChatMessageRole.USER,
                     content=_build_user_prompt(obj, schema_map, identifier_case),
