@@ -17,6 +17,7 @@ from backend.assessment.models import (
 from backend.context_bundle.builder import build_bundle
 from backend.context_bundle.skill import SKILL_NAME, render_skill
 from backend.migration.models import ObjectKind
+from backend.projects.models import Project
 from backend.projects.store import LocalFileStore
 from backend.schema_migration.naming import IdentifierCase
 from backend.validation.models import MatchStatus, ValidationItem, ValidationReport
@@ -268,19 +269,73 @@ def test_stale_ai_advice_is_not_in_the_skill():
     assert "AI migration analysis" not in text
 
 
+# Coordinates that must never reach an artifact meant to travel, and the markers used
+# to prove it. Kept as one list so both export formats are checked against the same set.
+_INFRASTRUCTURE = (
+    "instance.database.cloud.databricks.com", "sqlserver-prod-01.database.windows.net",
+    "svc@example.com", "customer-vault", "pg-password", "sqlserver-prod-01", "SalesDB",
+    "databricks_postgres", "psycopg",
+)
+
+
+def _loaded_project() -> Project:
+    """A project with every section populated and every coordinate set.
+
+    The plan, validation and notes paths matter: most of what the bundle emits is
+    derived from them, so a redaction check that only covers a bare project is
+    checking the one shape where there is least to leak.
+    """
+    sql = ('CREATE OR REPLACE FUNCTION public.usp_r() RETURNS TABLE(a int) '
+           'LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT 1; END $$;')
+    validation = ValidationReport(
+        source_database="SalesDB", target_database="databricks_postgres",
+        target_schema="public", match_score=100,
+        items=[ValidationItem(id="procedure:dbo.usp_R", kind=ObjectKind.PROCEDURE,
+                              source_name="dbo.usp_R", target_name="public.usp_r",
+                              target_kind="function", status=MatchStatus.MATCHED,
+                              severity=Severity.INFO)],
+    ).model_dump(mode="json")
+    project = _project(
+        name="Prod DB on sqlserver-prod-01", report=_report(database="SalesDB"),
+        plan=[_plan_item("procedure:dbo.usp_R", ObjectKind.PROCEDURE, "public.usp_r", sql,
+                         original="CREATE PROCEDURE dbo.usp_R AS BEGIN SELECT 1 FROM t; END",
+                         reasoning="r", notes="n")],
+        validation=validation,
+    )
+    project.source.host = "sqlserver-prod-01.database.windows.net"
+    project.source.username = "svc@example.com"
+    project.source.database = "SalesDB"
+    project.source.secret_ref = SecretRef(scope="customer-vault", key="pg-password")
+    project.target.host = "instance.database.cloud.databricks.com"
+    project.target.user = "svc@example.com"
+    project.target.database = "databricks_postgres"
+    project.target.secret_ref = SecretRef(scope="customer-vault", key="pg-password")
+    return project
+
+
 def test_the_export_never_names_the_infrastructure():
     """It travels to another repo or agent, so a hostname in it is disclosure with
     nothing gained — how the app connects is not this artifact's job."""
-    project = _project(name="Prod DB on sqlserver-prod-01", report=_report(database="SalesDB"))
-    project.target.host = "instance.database.cloud.databricks.com"
-    project.target.user = "svc@example.com"
-    project.target.secret_ref = SecretRef(scope="customer-vault", key="pg-password")
+    text = render_skill(build_bundle(_loaded_project()))
 
-    text = render_skill(build_bundle(project))
+    for detail in _INFRASTRUCTURE:
+        assert detail not in text, detail
 
-    for detail in ("instance.database.cloud.databricks.com", "svc@example.com",
-                   "customer-vault", "sqlserver-prod-01", "SalesDB", "psycopg"):
-        assert detail not in text
+
+def test_the_json_bundle_redacts_the_same_things_as_the_skill():
+    """Both formats are served, and only one of them was ever checked."""
+    import json
+
+    from backend.context_bundle.models import AiNotes, AiObjectNote
+
+    notes = AiNotes(endpoint="databricks-claude-opus-4-8", success=True, objects_total=1,
+                    generated_at="2026-09-28T15:11:40+00:00",
+                    notes=[AiObjectNote(source="dbo.usp_R", object_type="PROCEDURE",
+                                        call_site="c", behaviour="b", watch_out="w")])
+    blob = json.dumps(build_bundle(_loaded_project(), ai_notes=notes).model_dump(mode="json"))
+
+    for detail in _INFRASTRUCTURE:
+        assert detail not in blob, detail
 
 
 def test_incomplete_migrations_warn_at_the_top():

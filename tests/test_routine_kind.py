@@ -163,3 +163,71 @@ def test_the_skill_cautions_about_the_duplicate_rather_than_choosing():
     assert "[!CAUTION]" in text
     assert "exist in the target **twice**" in text
     assert "`dbo.usp_ItemReport`" in text
+
+
+# --- The generated block is not escapable -------------------------------------------
+#
+# Identifiers reach this from translated SQL — model output, derived from source object
+# names, and editable in the plan editor — so they are input, not a trusted constant.
+
+
+def _tag_of(sql: str) -> str:
+    import re
+    return re.search(r"DO \$(\w+)\$", sql).group(1)
+
+
+def _proname_literal(sql: str) -> str:
+    import re
+    return re.search(r"p\.proname = (.*)$", sql, re.M).group(1)
+
+
+def test_a_quote_in_a_name_is_escaped_not_closed():
+    out = kind_change_preamble(
+        "procedure", 'CREATE FUNCTION public."ev\'il"() RETURNS TABLE(a int) AS $$ $$;')
+    assert _proname_literal(out) == "'ev''il'"
+
+
+def test_a_name_containing_the_dollar_tag_cannot_close_the_block():
+    """Postgres identifiers may contain `$`, so a fixed tag was escapable: the body
+    ended early and everything after it parsed as top-level SQL."""
+    out = kind_change_preamble(
+        "procedure", 'CREATE FUNCTION public."a$lbx_kind$b"() RETURNS TABLE(a int) AS $$ $$;')
+
+    tag = _tag_of(out)
+    assert tag != "lbx_kind"                     # escalated away from the collision
+    assert out.count(f"${tag}$") == 2            # exactly one open, one close
+    assert _proname_literal(out) == "'a$lbx_kind$b'"   # and the real name is still targeted
+
+
+def test_the_tag_escalates_past_several_collisions():
+    out = kind_change_preamble(
+        "procedure",
+        'CREATE FUNCTION public."a$lbx_kind$q$lbx_kindx$b"() RETURNS TABLE(a int) AS $$ $$;')
+
+    tag = _tag_of(out)
+    assert out.count(f"${tag}$") == 2
+    assert f"${tag}$" not in _proname_literal(out)
+
+
+def test_a_benign_dollar_in_a_name_still_gets_its_guard():
+    """`"a$b"` is a legal name and must not lose the guard to over-caution."""
+    out = kind_change_preamble(
+        "procedure", 'CREATE FUNCTION public."a$b"() RETURNS TABLE(a int) AS $$ $$;')
+    assert _proname_literal(out) == "'a$b'"
+
+
+def test_a_mangled_identifier_skips_the_guard_rather_than_guessing():
+    """Blanking `--` comments truncates a quoted identifier containing one. Emitting a
+    DROP at whatever survived would aim at a name that was never there; skipping leaves
+    the re-apply to fail loudly with 42P13 instead."""
+    assert kind_change_preamble(
+        "procedure", 'CREATE FUNCTION public."a\nb"() RETURNS TABLE(a int) AS $$ $$;') == ""
+
+
+def test_every_emitted_block_is_balanced():
+    for name in ('"plain"', '"a$b"', '"a$lbx_kind$b"', '"ev\'il"', "unquoted_name"):
+        out = kind_change_preamble(
+            "procedure", f"CREATE FUNCTION public.{name}() RETURNS TABLE(a int) AS $$ $$;")
+        if not out:
+            continue
+        assert out.count(f"${_tag_of(out)}$") == 2, name

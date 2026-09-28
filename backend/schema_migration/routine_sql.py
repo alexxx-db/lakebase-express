@@ -68,6 +68,28 @@ def _literal(value: str) -> str:
     return value.replace("'", "''")
 
 
+def _dollar_tag(*embedded: str) -> str:
+    """A dollar-quote tag that cannot appear in ``embedded``.
+
+    The body of the DO block is dollar-quoted, and Postgres identifiers may legally
+    contain `$` — so an object named `a$lbx_kind$b` would close the block early and
+    everything after it would parse as top-level SQL. The tag is extended until it is
+    absent from every value interpolated into the body, which makes that impossible
+    rather than unlikely.
+    """
+    tag = "lbx_kind"
+    while any(f"${tag}$" in value for value in embedded):
+        tag += "x"
+    return tag
+
+
+# An identifier parsed out of a CREATE statement cannot contain these. Their presence
+# means the text was mangled rather than parsed — blanking `--` comments truncates a
+# quoted identifier that contains one, losing its closing quote and swallowing what
+# follows. Better to skip the guard than to aim a DROP at a name that was never there.
+_MANGLED_IDENT = re.compile(r"[;\n\r\x00]")
+
+
 def kind_change_preamble(source_kind: str, sql: str, default_schema: str = "public") -> str:
     """SQL dropping the stale routine, or "" when no kind change is happening.
 
@@ -94,14 +116,15 @@ def kind_change_preamble(source_kind: str, sql: str, default_schema: str = "publ
     m = matches[-1]
     schema = _identifier(m.group(2)) or default_schema
     name = _identifier(m.group(3))
-    if not name:
+    if not name or _MANGLED_IDENT.search(schema) or _MANGLED_IDENT.search(name):
         return ""
 
     stale_word = "PROCEDURE" if stale == "p" else "FUNCTION"
+    tag = _dollar_tag(schema, name)
     return (
         f"-- The source {source} became a {created}; Postgres cannot replace one kind\n"
         f"-- with the other, and leaving both would let callers reach the stale one.\n"
-        "DO $lbx_kind$\n"
+        f"DO ${tag}$\n"
         "DECLARE stale record;\n"
         "BEGIN\n"
         "  FOR stale IN\n"
@@ -115,7 +138,7 @@ def kind_change_preamble(source_kind: str, sql: str, default_schema: str = "publ
         f"    EXECUTE format('DROP {stale_word} %s', stale.signature);\n"
         "  END LOOP;\n"
         "END\n"
-        "$lbx_kind$;\n"
+        f"${tag}$;\n"
     )
 
 
