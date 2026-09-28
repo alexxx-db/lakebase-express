@@ -64,6 +64,25 @@ const AGENTS = [
 type AgentId = (typeof AGENTS)[number]["id"];
 
 /** Downloads the app-migration skill and shows how to hand it to an agent. */
+/** "2 days ago" / "just now" for an ISO timestamp, or "" when there isn't one.
+ *
+ * Model notes are written once and replayed by every export, so how old they are is
+ * what separates current advice from advice about a translation since replaced. An
+ * absolute date would make the reader do that subtraction themselves.
+ */
+function relativeAge(iso: string | undefined): string {
+  if (!iso) return "";
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return "";
+  const minutes = Math.max(0, Math.round((Date.now() - then) / 60000));
+  if (minutes < 2) return "just now";
+  if (minutes < 60) return `${minutes} minutes ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
 export default function AppMigrationSkill({ projectId, onSave, fmEndpoint }: Props) {
   const [skill, setSkill] = useState("");
   const [bundle, setBundle] = useState<ContextBundle | null>(null);
@@ -126,6 +145,9 @@ export default function AppMigrationSkill({ projectId, onSave, fmEndpoint }: Pro
 
   const selected = AGENTS.find((a) => a.id === agent) ?? AGENTS[0];
   const notes = bundle?.ai_notes ?? null;
+  // Notes are generated once and replayed on every export, so their age is the only
+  // signal that separates current advice from advice about a translation since replaced.
+  const noteAge = relativeAge(notes?.generated_at);
   const counts = new Map((bundle?.sections ?? []).map((s) => [s.name, s.count]));
   // Objects, not call sites: this tool never sees the application, so finding the
   // places that call them is the agent's job. Triggers are excluded — they fire on
@@ -205,19 +227,31 @@ export default function AppMigrationSkill({ projectId, onSave, fmEndpoint }: Pro
               {busy
                 ? "Deriving it from this migration…"
                 : `${(skill.length / 1024).toFixed(0)} KB of Markdown, derived from this migration.`}
-              {notes?.success && ` Includes ${notes.notes.length} model notes.`}
+              {notes?.success && ` Includes ${notes.notes.length} model notes${noteAge ? `, written ${noteAge}` : ""}.`}
             </p>
           </div>
           <div className="savebar__actions">
             {notes?.success && <ModelBadge endpoint={notes.endpoint}
               title="The Foundation Model that wrote the advisory notes in this skill." />}
-            {!notes?.success && (
-              <button className="btn btn--sm" disabled={busy || thinking} onClick={addNotes}>
-                {thinking ? "Reading…" : "Add model notes"}
-              </button>
-            )}
+            <button
+              className={`btn btn--sm${notes?.stale_dropped ? " btn--primary" : ""}`}
+              disabled={busy || thinking}
+              onClick={addNotes}
+              title={notes?.success
+                ? "Notes are written once and reused by every export — re-run them after re-translating an object."
+                : "A model reads each translated object and adds what changes for its callers."}
+            >
+              {thinking ? "Reading…" : notes?.success ? "Re-run model notes" : "Add model notes"}
+            </button>
           </div>
         </div>
+        {!!notes?.stale_dropped && !busy && (
+          <div className="banner banner--warn">
+            {notes.stale_dropped} model note{notes.stale_dropped === 1 ? " described" : "s described"} a
+            translation that has since been replaced, so {notes.stale_dropped === 1 ? "it was" : "they were"} left
+            out of the skill. Re-run the notes so the advisory section matches the objects as they are now.
+          </div>
+        )}
         {!notes?.success && !busy && (
           <>
             <p className="muted">

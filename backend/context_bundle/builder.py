@@ -22,6 +22,7 @@ import re
 from datetime import datetime, timezone
 from typing import Iterable
 
+from backend.assessment import callable_shape
 from backend.assessment.models import AssessmentReport, Severity, TableInfo
 from backend.assessment.temp_objects import KIND_RULE_IDS
 from backend.context_bundle import rules
@@ -39,6 +40,7 @@ from backend.context_bundle.models import (
     SectionIndex,
     SourceSummary,
     TargetContract,
+    sql_digest,
 )
 from backend.migration.models import ObjectKind, PlanItem
 from backend.projects.models import Project
@@ -63,17 +65,54 @@ _CODE_KINDS = frozenset(
     {ObjectKind.PROCEDURE, ObjectKind.VIEW, ObjectKind.FUNCTION, ObjectKind.TRIGGER}
 )
 
-# How a call site changes, per object type.
-_CALL_CHANGE = {
-    "PROCEDURE": (
-        "`EXEC dbo.X @a = 1` becomes `CALL {target}(...)`. A Postgres procedure "
-        "cannot return a result set — if the application reads rows from this "
-        "call, it needs a function and `SELECT * FROM {target}(...)`."
-    ),
-    "FUNCTION": "`SELECT dbo.X(a)` becomes `SELECT {target}(a)`; argument order and types are unchanged.",
-    "VIEW": "Referenced as `{target}`; the query shape is unchanged.",
-    "TRIGGER": "Fires on its own as before — application code does not call it.",
-}
+
+# Keyed on what the target IS, not on what the source was: one call form is stated,
+# never two offered (see assessment/callable_shape).
+def _call_change(
+    source_type: str, target: str, kind: str, returns_set: bool, source_returns_rows: bool,
+    kind_conflict: bool = False,
+) -> str:
+    if not kind:
+        return ""
+    if kind_conflict:
+        return (
+            f"**Do not rely on a call form for this one yet.** The migration created a "
+            f"{kind} named {target}, but validation still finds a "
+            f"{source_type.lower()} of that name in the target — both exist, and "
+            "PostgreSQL picks between them by argument type, so a caller can reach "
+            "either. Drop the stale one first (see the known gaps); until then any "
+            "call may fail with SQLSTATE 42809."
+        )
+    if kind == callable_shape.PROCEDURE:
+        rule = (
+            f"`EXEC dbo.X @a = 1` becomes `CALL {target}(...)`, and named arguments "
+            "become positional or `=>` notation. OUT parameters become INOUT — read "
+            "them from the CALL result."
+        )
+        if source_returns_rows:
+            rule += (
+                " **This one cannot serve its caller as it stands**: the source returned "
+                "a result set and a Postgres procedure cannot. See the known gaps — the "
+                "fix is a database change, not an application one."
+            )
+        return rule
+    if kind == callable_shape.FUNCTION:
+        how = f"`SELECT * FROM {target}(...)`" if returns_set else f"`SELECT {target}(...)`"
+        if source_type.upper() == "PROCEDURE":
+            return (
+                f"`EXEC dbo.X @a = 1` becomes {how} — it is a **function** in the target, "
+                "not a procedure, because it returns a result set. `CALL` fails with "
+                "SQLSTATE 42809."
+            )
+        if returns_set:
+            return (
+                f"Table-valued: queried as {how} rather than joined directly; argument "
+                "order and types are unchanged."
+            )
+        return f"`SELECT dbo.X(a)` becomes {how}; argument order and types are unchanged."
+    if kind == callable_shape.VIEW:
+        return f"Referenced as `{target}`; the query shape is unchanged."
+    return "Fires on its own as before — application code does not call it."
 
 
 # --- Parsing the stored row -------------------------------------------------------
@@ -254,7 +293,24 @@ def _columns(tables: list[TableInfo], project: Project) -> list[ColumnContract]:
     return out
 
 
-def _callables(plan: list[PlanItem], project: Project) -> list[CallableContract]:
+def _callables(
+    plan: list[PlanItem], project: Project, validation: ValidationReport | None = None
+) -> list[CallableContract]:
+    """Call sites, reconciled against the target when a validation run exists.
+
+    The plan records the SQL the migration *intended*. Reading the created kind from
+    it is right up until the apply did not take — a reshaped routine cannot replace
+    the other kind — after which the plan says function and the database says
+    procedure. Validation is the only record of what is actually there.
+    """
+    # What validation actually found in the target, per plan item id. Validation
+    # reports the kind it matched, so this is a fact rather than an inference —
+    # a reshaped procedure legitimately matches as a function.
+    found_kind = {
+        item.id: item.target_kind
+        for item in (validation.items if validation else [])
+        if item.target_kind
+    }
     ic = project.identifier_case
     out: list[CallableContract] = []
     for item in plan:
@@ -263,6 +319,18 @@ def _callables(plan: list[PlanItem], project: Project) -> list[CallableContract]
         object_type = item.kind.value.upper()
         source = item.id.split(":", 1)[1] if ":" in item.id else item.id
         translated = bool(item.sql.strip())
+        # Read from the SQL that was produced, not inferred from the source type: a
+        # procedure returning a result set has to become a function, and the call
+        # form the application must use follows what actually exists.
+        kind = callable_shape.target_kind(item.sql)
+        returns_set = callable_shape.returns_set(item.sql)
+        source_returns_rows = (
+            object_type == "PROCEDURE" and callable_shape.returns_result_set(item.original)
+        )
+        # The plan created one kind and validation found the other: both exist, or the
+        # apply never took. Either way no single call form can be promised.
+        in_target = found_kind.get(item.id, "")
+        kind_conflict = bool(kind and in_target and kind != in_target)
         if not translated:
             provenance = "not-translated"
         else:
@@ -274,9 +342,16 @@ def _callables(plan: list[PlanItem], project: Project) -> list[CallableContract]
         out.append(
             CallableContract(
                 object_type=object_type,
+                target_kind=kind,
+                returns_set=returns_set,
+                source_returns_result_set=source_returns_rows,
+                kind_conflict=kind_conflict,
                 source=source,
                 target=item.name,
-                call_change=_CALL_CHANGE.get(object_type, "").format(target=item.name),
+                call_change=_call_change(
+                    object_type, item.name, kind, returns_set, source_returns_rows,
+                    kind_conflict,
+                ),
                 translated=translated,
                 provenance=provenance,
                 companion_function=companion,
@@ -374,6 +449,7 @@ def _gaps(
     report: AssessmentReport,
     validation: ValidationReport | None,
     parity: QueryParityReport | None,
+    callables: list[CallableContract] | None = None,
 ) -> list[KnownGap]:
     """What did not come across. HIGH findings are grouped by rule — a wide
     database reports one rule against dozens of objects — while validation and
@@ -428,6 +504,35 @@ def _gaps(
                 )
             )
 
+    # A procedure that returned rows and is still a Postgres procedure. Listed per
+    # object rather than grouped: each one is a specific call site that fails on every
+    # request, and the reader has to know which.
+    for call in callables or []:
+        if not call.source_returns_result_set or call.target_kind != callable_shape.PROCEDURE:
+            continue
+        out.append(
+            KnownGap(
+                id=f"callable_shape:{call.source}",
+                title=f"Procedure returns a result set but was created as a PROCEDURE: {call.source}",
+                severity="high",
+                origin="plan",
+                detail=(
+                    f"{call.source} ends with a SELECT, so its caller reads rows back. In the "
+                    f"target it is a PROCEDURE, and a Postgres procedure cannot return a result "
+                    f"set: `SELECT * FROM {call.target}(...)` fails with SQLSTATE 42809 "
+                    f'("is a procedure") and `CALL {call.target}(...)` runs it but hands the '
+                    "caller nothing. No application-side change recovers the rows."
+                ),
+                recommendation=(
+                    f"Fix it in the database, not the application: re-translate {call.source} as "
+                    "`CREATE FUNCTION ... RETURNS TABLE(...)` with the final SELECT as a "
+                    f"`RETURN QUERY`, then call it as `SELECT * FROM {call.target}(...)`. "
+                    "Re-export this bundle afterwards so the call site here matches."
+                ),
+                affected=[call.target],
+            )
+        )
+
     if parity is not None:
         for comparison in parity.comparisons:
             if comparison.status.value == "match":
@@ -466,12 +571,46 @@ def _source_summary(report: AssessmentReport, project: Project) -> SourceSummary
     )
 
 
+def _fresh_notes(ai_notes: AiNotes | None, plan: list[PlanItem]) -> tuple[AiNotes | None, int]:
+    """``ai_notes`` with every note that no longer describes the current SQL removed.
+
+    Notes are generated once and stored on the project, so re-translating an object
+    leaves its note describing SQL that is gone. That is not a harmless staleness: a
+    note saying "CALL it and FETCH two refcursors" beside a deterministic call site
+    saying "SELECT * FROM it" is two incompatible call forms again, which is the exact
+    failure this bundle exists to prevent. A note that cannot be shown to match is
+    dropped, and the count is surfaced in ``completeness`` so the fix (re-run the
+    notes) is obvious.
+
+    Notes stored before digests existed carry "" and are kept: they are unverifiable
+    rather than known-stale, and silently emptying the section for every existing
+    project would trade one wrong impression for another.
+    """
+    if ai_notes is None or not ai_notes.notes:
+        return ai_notes, 0
+    current = {
+        item.id.split(":", 1)[-1]: sql_digest(item.sql)
+        for item in plan
+        if item.kind in _CODE_KINDS
+    }
+    kept = [
+        note for note in ai_notes.notes
+        if not note.sql_digest or current.get(note.source) == note.sql_digest
+    ]
+    dropped = len(ai_notes.notes) - len(kept)
+    if not dropped:
+        return ai_notes, 0
+    return ai_notes.model_copy(update={"notes": kept, "stale_dropped": dropped}), dropped
+
+
 def _completeness(
     project: Project,
     report: AssessmentReport | None,
     plan: list[PlanItem],
     validation: ValidationReport | None,
     parity: QueryParityReport | None,
+    *,
+    stale_notes: int = 0,
 ) -> list[str]:
     """What this bundle cannot vouch for. A bundle can be exported mid-migration,
     and silence would read as success."""
@@ -506,6 +645,12 @@ def _completeness(
         out.append(
             "No tables were selected for the data load, so this bundle describes "
             "schema and object changes only."
+        )
+    if stale_notes:
+        out.append(
+            f"{stale_notes} model note{'' if stale_notes == 1 else 's'} described a "
+            "translation that has since been replaced and were left out. Re-run the "
+            "notes to get advice that matches the objects as they are now."
         )
     return out
 
@@ -623,14 +768,20 @@ def build_bundle(
     tables = _target_tables(report, plan) if report else []
     columns = _columns(tables, project) if report else []
     expressions, expressions_omitted = _expressions(tables, plan)
+    # Built before `parts` because the gaps read it: a callable whose target shape
+    # cannot serve its caller is a gap, and that is decided from the translated SQL.
+    callables = _callables(plan, project, validation)
     parts = {
         "names": _names(report, tables, project) if report else [],
         "columns": columns,
-        "callables": _callables(plan, project),
+        "callables": callables,
         "expressions": expressions,
         "rewrite_rules": _rewrite_rules(report, tables) if report else [],
-        "gaps": _gaps(report, validation, parity) if report else [],
+        "gaps": _gaps(report, validation, parity, callables) if report else [],
     }
+    # Stale notes are removed before anything renders them: a note describing a
+    # translation that has since been replaced contradicts the call-site section.
+    ai_notes, stale_notes = _fresh_notes(ai_notes, plan)
     parts["ai_notes"] = ai_notes
     omitted = {
         "columns": sum(len(t.columns) for t in tables) - len(columns),
@@ -644,7 +795,9 @@ def build_bundle(
         bundle_version=BUNDLE_VERSION,
         tool_version=tool_version,
         phase_statuses=statuses,
-        completeness=_completeness(project, report, plan, validation, parity),
+        completeness=_completeness(
+            project, report, plan, validation, parity, stale_notes=stale_notes
+        ),
     )
 
     summary = (

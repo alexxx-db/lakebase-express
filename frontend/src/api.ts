@@ -381,6 +381,9 @@ export interface ValidationItem {
   kind: ObjectKind;
   source_name: string;
   target_name: string;
+  /** What the object actually is in the target — not always its source kind, since a
+   * procedure returning a result set must be a function. "" when nothing was found. */
+  target_kind: string;
   status: MatchStatus;
   severity: Severity;
   detail: string;
@@ -584,6 +587,10 @@ export interface BundleColumn {
 
 export interface BundleCallable {
   object_type: string;
+  target_kind: string;
+  returns_set: boolean;
+  source_returns_result_set: boolean;
+  kind_conflict: boolean;
   source: string;
   target: string;
   call_change: string;
@@ -642,6 +649,8 @@ export interface BundleSourceSummary {
 export interface AiObjectNote {
   source: string;
   object_type: string;
+  /** Digest of the translated SQL this note describes; stale notes are dropped. */
+  sql_digest: string;
   call_site: string;
   behaviour: string;
   watch_out: string;
@@ -651,6 +660,10 @@ export interface AiObjectNote {
 // it. Fail-soft: success=false carries the reason instead of throwing.
 export interface AiNotes {
   endpoint: string;
+  /** ISO-8601 UTC when the model wrote them; "" for notes stored before this existed. */
+  generated_at: string;
+  /** Notes dropped because they described SQL that has since changed. */
+  stale_dropped: number;
   notes: AiObjectNote[];
   success: boolean;
   error?: string | null;

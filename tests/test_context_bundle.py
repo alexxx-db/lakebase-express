@@ -327,7 +327,7 @@ def test_callables_describe_the_call_site_change_and_provenance():
 
     by_type = {c.object_type: c for c in bundle.callables}
     assert "CALL public.get_orders" in by_type["PROCEDURE"].call_change
-    assert "cannot return a result set" in by_type["PROCEDURE"].call_change
+    assert by_type["PROCEDURE"].target_kind == "procedure"
     assert by_type["PROCEDURE"].provenance == "ai"
     assert by_type["VIEW"].provenance == "user-edited"      # sql present, no model reasoning
     assert by_type["FUNCTION"].translated is False
@@ -335,6 +335,74 @@ def test_callables_describe_the_call_site_change_and_provenance():
 
     section = next(s for s in bundle.sections if s.name == "callables")
     assert section.provenance == "mixed"
+
+
+def test_a_procedure_translated_as_a_function_is_called_as_one():
+    """The regression that broke a migrated app: the bundle described the *source*
+    type, so a procedure reshaped into a function was still documented with `CALL`."""
+    plan = [
+        _plan_item(
+            "procedure:dbo.usp_ItemReport", ObjectKind.PROCEDURE,
+            "public.usp_itemreport",
+            "CREATE OR REPLACE FUNCTION public.usp_itemreport(p_category text)\n"
+            "RETURNS TABLE(item_id int) AS $$ BEGIN RETURN QUERY SELECT 1; END $$;",
+            original="CREATE PROCEDURE dbo.usp_ItemReport AS BEGIN SELECT * FROM dbo.Items; END",
+            reasoning="reshaped to a function because it returns rows",
+        ),
+    ]
+    bundle = build_bundle(_project(report=_report(), plan=plan))
+
+    call = bundle.callables[0]
+    assert call.object_type == "PROCEDURE"          # what it was
+    assert call.target_kind == "function"           # what it is
+    assert call.returns_set is True
+    assert "SELECT * FROM public.usp_itemreport(...)" in call.call_change
+    assert "42809" in call.call_change
+    assert "CALL public.usp_itemreport" not in call.call_change
+    # Nothing is broken, so it is not a gap.
+    assert not any(g.id.startswith("callable_shape:") for g in bundle.gaps)
+
+
+def test_a_row_returning_procedure_left_as_a_procedure_is_a_high_gap():
+    """A Postgres procedure cannot return a result set, so no application-side call
+    form recovers the rows — it has to be reported as needing a database fix."""
+    plan = [
+        _plan_item(
+            "procedure:dbo.usp_ItemReport", ObjectKind.PROCEDURE,
+            "public.usp_itemreport",
+            "CREATE OR REPLACE PROCEDURE public.usp_itemreport(p_category text)\n"
+            "LANGUAGE plpgsql AS $$ BEGIN SELECT 1; END $$;",
+            original="CREATE PROCEDURE dbo.usp_ItemReport AS BEGIN SELECT * FROM dbo.Items; END",
+        ),
+    ]
+    bundle = build_bundle(_project(report=_report(), plan=plan))
+
+    gap = next(g for g in bundle.gaps if g.id == "callable_shape:dbo.usp_ItemReport")
+    assert gap.severity == "high"
+    assert "42809" in gap.detail
+    assert "RETURNS TABLE" in gap.recommendation
+    # And the call site says so rather than implying CALL will do.
+    assert "cannot serve its caller" in bundle.callables[0].call_change
+
+
+def test_a_procedure_that_returns_nothing_is_unchanged():
+    """The common case must not acquire a warning it does not need."""
+    plan = [
+        _plan_item(
+            "procedure:dbo.usp_SetStatus", ObjectKind.PROCEDURE, "public.usp_setstatus",
+            "CREATE OR REPLACE PROCEDURE public.usp_setstatus(p_id int) LANGUAGE plpgsql "
+            "AS $$ BEGIN UPDATE orders SET status = 1 WHERE id = p_id; END $$;",
+            original="CREATE PROCEDURE dbo.usp_SetStatus @Id int AS BEGIN UPDATE dbo.Orders "
+                     "SET Status = 1 WHERE Id = @Id; END",
+        ),
+    ]
+    bundle = build_bundle(_project(report=_report(), plan=plan))
+
+    call = bundle.callables[0]
+    assert call.target_kind == "procedure" and call.source_returns_result_set is False
+    assert "CALL public.usp_setstatus" in call.call_change
+    assert "cannot serve its caller" not in call.call_change
+    assert bundle.gaps == []
 
 
 # --- Rewrite rules ----------------------------------------------------------------

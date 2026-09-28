@@ -72,5 +72,11 @@ def latest_notes(project_id: str) -> AiNotes | None:
             continue
         state = _REGISTRY.get(record.run_id)
         if state and state.notes and state.notes.success:
-            return state.notes
+            notes = state.notes
+            # Notes written before they carried a timestamp still have a run row with
+            # one, and their age is the whole point — they are replayed on every
+            # export, so "when" is what says whether they still describe the plan.
+            if not notes.generated_at and record.updated_at:
+                notes = notes.model_copy(update={"generated_at": record.updated_at})
+            return notes
     return None

@@ -178,10 +178,50 @@ def test_call_site_rules_are_stated_once_per_object_type():
     ]
     text = _skill(report=_report(), plan=plan)
 
-    assert "### Procedures — 3" in text
-    assert text.count("cannot return a result set") == 1
+    assert "### Procedures in the target — 3" in text
+    assert text.count("OUT parameters become INOUT") == 1
     for i in range(3):
         assert f"`public.p{i}`" in text
+
+
+def test_a_reshaped_procedure_is_listed_as_a_function_with_its_call_form():
+    """A procedure that returns rows is a function in the target. Listing it under
+    "Procedures" beside a `CALL` rule is what made a migrated app fail with 42809."""
+    plan = [
+        _plan_item(
+            "procedure:dbo.usp_ItemReport", ObjectKind.PROCEDURE,
+            "public.usp_itemreport",
+            "CREATE OR REPLACE FUNCTION public.usp_itemreport(p_category text) "
+            "RETURNS TABLE(item_id int) AS $$ BEGIN RETURN QUERY SELECT 1; END $$;",
+            original="CREATE PROCEDURE dbo.usp_ItemReport AS BEGIN SELECT * FROM dbo.Items; END",
+        ),
+    ]
+    text = _skill(report=_report(), plan=plan)
+
+    assert "### Functions in the target — 1" in text
+    assert "### Procedures in the target" not in text
+    assert "was a procedure in SQL Server and is a **function** here" in text
+    assert "SELECT * FROM public.usp_itemreport(...)" in text
+
+
+def test_a_row_returning_procedure_left_as_a_procedure_is_flagged_as_undoable():
+    plan = [
+        _plan_item(
+            "procedure:dbo.usp_ItemReport", ObjectKind.PROCEDURE,
+            "public.usp_itemreport",
+            "CREATE OR REPLACE PROCEDURE public.usp_itemreport(p text) AS $$ BEGIN END $$;",
+            original="CREATE PROCEDURE dbo.usp_ItemReport AS BEGIN SELECT * FROM dbo.Items; END",
+        ),
+    ]
+    text = _skill(report=_report(), plan=plan)
+
+    assert "[!CAUTION]" in text
+    assert "do not" in text and "work around this in application" in text
+    assert "`dbo.usp_ItemReport`" in text
+    # The gap must reach the skill too: the renderer drops origins it does not list,
+    # so a gap present in the JSON bundle can still be missing from the handover.
+    assert "Objects whose target shape cannot serve their caller" in text
+    assert "RETURNS TABLE" in text
 
 
 def test_untranslated_callables_are_called_out():

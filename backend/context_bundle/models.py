@@ -22,10 +22,21 @@ the reverse is not. The frontend types in ``frontend/src/api.ts`` mirror these
 """
 from __future__ import annotations
 
+import hashlib
+
 from pydantic import BaseModel
 
 # Bumped when a field changes meaning, so a consumer can tell what it is holding.
 BUNDLE_VERSION = "1"
+
+
+def sql_digest(sql: str) -> str:
+    """Short stable digest of a translated object's SQL.
+
+    Lives here rather than with the notes generator so the builder can check a note
+    against the current plan without importing the Foundation Model stack.
+    """
+    return hashlib.sha256((sql or "").strip().encode()).hexdigest()[:16]
 
 
 class Provenance(BaseModel):
@@ -114,9 +125,26 @@ class ColumnContract(BaseModel):
 
 
 class CallableContract(BaseModel):
-    """A procedure, function, view, or trigger the application calls."""
+    """A procedure, function, view, or trigger the application calls.
 
-    object_type: str           # PROCEDURE | FUNCTION | VIEW | TRIGGER
+    ``object_type`` is what the *source* was; ``target_kind`` is what was actually
+    created, read out of the translated SQL. They differ whenever a procedure was
+    reshaped into a function, and the call form follows ``target_kind`` — calling a
+    function with ``CALL``, or a procedure with ``SELECT * FROM``, fails every
+    request with SQLSTATE 42809.
+    """
+
+    object_type: str           # PROCEDURE | FUNCTION | VIEW | TRIGGER (the source)
+    # procedure | function | view | trigger, or "" when nothing was translated.
+    target_kind: str = ""
+    # The target returns rows the caller selects (RETURNS TABLE / SETOF).
+    returns_set: bool = False
+    # The source handed a result set to its caller, so the target has to as well.
+    source_returns_result_set: bool = False
+    # Validation found a routine of the *source* kind still in the target while the
+    # plan created the other kind: both exist and a caller can reach the stale one,
+    # so no single call form can be promised until one is dropped.
+    kind_conflict: bool = False
     source: str
     target: str
     # How a call site changes, e.g. EXEC dbo.X -> CALL public.x(...).
@@ -166,7 +194,9 @@ class KnownGap(BaseModel):
     id: str
     title: str
     severity: str              # info | low | medium | high
-    origin: str                # assessment | validation | parity | ai
+    # plan | assessment | validation | parity | ai. A new value must also be added
+    # to the gaps renderer in skill.py, which drops origins it does not list.
+    origin: str
     detail: str = ""
     recommendation: str = ""
     affected: list[str] = []
@@ -186,10 +216,20 @@ class OperationalContract(BaseModel):
 
 
 class AiObjectNote(BaseModel):
-    """A model's reading of one translated object, for the caller's benefit."""
+    """A model's reading of one translated object, for the caller's benefit.
+
+    ``sql_digest`` pins the note to the translation it was written against. Notes are
+    generated once and stored, so a later re-translation leaves them describing SQL
+    that no longer exists — and an advisory note contradicting the deterministic call
+    site is the same trap as naming two call forms at once. The builder drops a note
+    whose digest no longer matches rather than rendering the contradiction.
+    """
 
     source: str
     object_type: str
+    # sha256 (first 16 hex chars) of the translated SQL this note describes. Empty on
+    # notes stored before this existed, which cannot be verified either way.
+    sql_digest: str = ""
     # How a call site changes beyond the mechanical rename.
     call_site: str = ""
     # Behaviour that differs even when the signature looks the same.
@@ -207,6 +247,13 @@ class AiNotes(BaseModel):
     """
 
     endpoint: str = ""
+    # When the model wrote them, ISO-8601 UTC. Notes are generated once and replayed
+    # on every export, so without this nothing says whether they describe the current
+    # translation or one from weeks ago. Empty on notes stored before this existed.
+    generated_at: str = ""
+    # Notes the builder removed because they described SQL that has since changed.
+    # Surfaced so a caller can prompt for a re-run instead of silently showing fewer.
+    stale_dropped: int = 0
     notes: list[AiObjectNote] = []
     # Translated objects that existed, so a reader can tell "no note" from
     # "not looked at" when the prompt cap bites.

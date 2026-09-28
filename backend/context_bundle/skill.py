@@ -38,25 +38,34 @@ _DESCRIPTION = (
     "code, queries, ORM mappings or migrations that talk to this database."
 )
 
-# How a call site changes, stated once per object type.
+# How a call site changes, stated once per target kind — that is what decides the
+# call form, not what the source was.
 _CALL_RULE = {
-    "PROCEDURE": (
+    "procedure": (
         "`EXEC dbo.Proc @a = 1` becomes `CALL <target>(...)`, and named arguments "
-        "become positional or `=>` notation. A Postgres procedure **cannot return a "
-        "result set**: anywhere the application reads rows back from one of these, it "
-        "needs a function instead and `SELECT * FROM <target>(...)`. OUT parameters "
-        "become INOUT."
+        "become positional or `=>` notation. OUT parameters become INOUT, read back "
+        "from the CALL result. These return **no** result set: `SELECT * FROM "
+        "<target>(...)` fails with SQLSTATE 42809."
     ),
-    "FUNCTION": (
-        "`SELECT dbo.Fn(a)` becomes `SELECT <target>(a)` with the same argument order "
-        "and types. A table-valued function is queried as `SELECT * FROM <target>(a)` "
-        "rather than being joined directly."
+    "function": (
+        "Call these as functions, never with `CALL` — `CALL` on a function fails with "
+        "SQLSTATE 42809. A scalar one is `SELECT <target>(a)`; one returning `TABLE` "
+        "or `SETOF` is queried as `SELECT * FROM <target>(a)` rather than joined "
+        "directly. Argument order and types are unchanged."
     ),
-    "VIEW": "Referenced by the name below; the columns and query shape are unchanged.",
-    "TRIGGER": (
+    "view": "Referenced by the name below; the columns and query shape are unchanged.",
+    "trigger": (
         "Fires on its own, so no call site changes — but each one now has a companion "
         "function too (see section 1), which anything inspecting the catalog will see."
     ),
+}
+
+# Plural headings, since the target kind is lower-cased.
+_KIND_HEADING = {
+    "procedure": "Procedures",
+    "function": "Functions",
+    "view": "Views",
+    "trigger": "Triggers",
 }
 
 # Headings for the change keys that are not a source type name.
@@ -223,22 +232,67 @@ def _callables(w, bundle: ContextBundle) -> None:
         w("")
         return
 
-    by_type: dict[str, list] = {}
+    # Grouped by what each object became; an untranslated one keeps its source kind.
+    by_kind: dict[str, list] = {}
     for call in bundle.callables:
-        by_type.setdefault(call.object_type, []).append(call)
+        by_kind.setdefault(call.target_kind or call.object_type.lower(), []).append(call)
 
-    for object_type in ("PROCEDURE", "FUNCTION", "VIEW", "TRIGGER"):
-        calls = by_type.get(object_type)
+    for kind in ("procedure", "function", "view", "trigger"):
+        calls = by_kind.get(kind)
         if not calls:
             continue
-        w(f"### {object_type.title()}s — {len(calls)}")
+        w(f"### {_KIND_HEADING[kind]} in the target — {len(calls)}")
         w("")
-        w(_CALL_RULE[object_type])
+        w(_CALL_RULE[kind])
         w("")
-        w("| source | now |")
-        w("|---|---|")
+        reshaped = [c for c in calls if c.object_type.lower() != kind]
+        if reshaped:
+            w("> [!IMPORTANT]")
+            w(f"> {_listed([c.source for c in reshaped])} "
+              f"{'was' if len(reshaped) == 1 else 'were'} a "
+              f"{reshaped[0].object_type.lower()} in SQL Server and "
+              f"{'is' if len(reshaped) == 1 else 'are'} a **{kind}** here. Use the "
+              f"{kind} call form above, not the one the source implies.")
+            w("")
+        w("| source | now | call |")
+        w("|---|---|---|")
         for call in calls:
-            w(f"| `{_cell(call.source)}` | `{_cell(call.target)}` |")
+            # An untranslated object has no target kind, so it is grouped under its
+            # source kind — but nothing was created, and naming a call form for it sends
+            # the caller at an object that does not exist (SQLSTATE 42883).
+            if not call.translated:
+                how = "not translated — no object to call"
+            elif kind == "function":
+                how = (f"SELECT * FROM {call.target}(...)" if call.returns_set
+                       else f"SELECT {call.target}(...)")
+            elif kind == "procedure":
+                how = f"CALL {call.target}(...)"
+            else:
+                how = call.target
+            w(f"| `{_cell(call.source)}` | `{_cell(call.target)}` | `{_cell(how)}` |")
+        w("")
+
+    conflicted = [c for c in bundle.callables if c.kind_conflict]
+    if conflicted:
+        w("> [!CAUTION]")
+        w(f"> {_listed([c.source for c in conflicted])} exist in the target **twice** — "
+          "once as a procedure and once as a function, because `CREATE OR REPLACE` "
+          "cannot convert one kind into the other. PostgreSQL chooses between them by "
+          "argument type, so a call can reach the stale one and fail with SQLSTATE "
+          "42809. Do not pick a call form for these until the stale routine is dropped "
+          "(see the known gaps).")
+        w("")
+
+    broken = [c for c in bundle.callables if c.source_returns_result_set
+              and c.target_kind == "procedure"]
+    if broken:
+        one = len(broken) == 1
+        w("> [!CAUTION]")
+        w(f"> {_listed([c.source for c in broken])} returned a result set in SQL Server "
+          f"but {'exists' if one else 'exist'} here as "
+          f"{'a procedure' if one else 'procedures'}, which in Postgres cannot return "
+          "one. Neither call form recovers the rows, so **do not** work around this in "
+          "application code — it needs a database fix (see the known gaps).")
         w("")
 
     untranslated = [c for c in bundle.callables if not c.translated]
@@ -294,12 +348,16 @@ def _gaps(w, bundle: ContextBundle) -> None:
         w("")
         return
 
+    # An origin missing from `order` is silently dropped, so every origin KnownGap
+    # can carry needs a row here. `plan` leads: it holds call sites that fail on
+    # every request, which outranks a construct someone has to rewrite by hand.
     labels = {
+        "plan": "Objects whose target shape cannot serve their caller",
         "assessment": "Source constructs that need a manual rewrite",
         "validation": "Objects that do not match in the target",
         "parity": "Behavioural differences proven by running queries on both sides",
     }
-    order = ["assessment", "validation", "parity"]
+    order = ["plan", "assessment", "validation", "parity"]
     by_origin: dict[str, list] = {}
     for gap in bundle.gaps:
         by_origin.setdefault(gap.origin, []).append(gap)
@@ -376,12 +434,23 @@ def _ai_notes(w, bundle: ContextBundle) -> None:
         w(f"Notes were requested but could not be produced: {_cell(ai.error or 'unknown error')}")
         w("")
         return
-    w(f"**Advisory — written by `{ai.endpoint}`, not derived from the migration.** "
-      "Everything above this section is deterministic; this part is a model's reading "
-      "of each object's original T-SQL beside its translation. Verify a note against "
-      "the source before you act on it, and prefer the sections above where they "
-      "disagree.")
+    # When, not just who: these are generated once and replayed on every export, so a
+    # reader has no other way to tell current advice from advice about a translation
+    # that has since been replaced.
+    written = f" on {_cell(ai.generated_at)}" if ai.generated_at else ""
+    w(f"**Advisory — written by `{ai.endpoint}`{written}, not derived from the "
+      "migration.** Everything above this section is deterministic; this part is a "
+      "model's reading of each object's original T-SQL beside its translation. Verify "
+      "a note against the source before you act on it, and prefer the sections above "
+      "where they disagree.")
     w("")
+    if ai.stale_dropped:
+        plural = "" if ai.stale_dropped == 1 else "s"
+        w(f"> [!NOTE]")
+        w(f"> {ai.stale_dropped} note{plural} described a translation that has since been "
+          "replaced and {} left out — re-run the notes for advice that matches the "
+          "objects as they are now.".format("was" if ai.stale_dropped == 1 else "were"))
+        w("")
     unread = ai.objects_total - len(ai.notes)
     if unread > 0:
         w(f"Covers {len(ai.notes)} of {ai.objects_total} translated objects — the rest were "

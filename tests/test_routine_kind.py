@@ -6,6 +6,7 @@ procedure either fails (42P13, same signature) or leaves **both** (different
 signature) — and then PostgreSQL picks between them by argument type, so a caller can
 reach the stale one and get 42809 on every request.
 """
+from backend.context_bundle.builder import build_bundle
 from backend.migration.executor import _item_sql
 from backend.migration.models import ObjectKind, PlanItem
 from backend.schema_migration.routine_sql import kind_change_preamble, with_kind_guard
@@ -99,3 +100,66 @@ def test_the_async_notebook_guards_too():
         PostLoadStatement(name="public.usp_ItemReport", kind="procedure", sql=FUNCTION_SQL),
     ])
     assert "DROP PROCEDURE" in rendered
+
+
+# --- Reported when both routines already exist -------------------------------------
+
+
+def _report():
+    from backend.assessment.models import AssessmentReport
+
+    return AssessmentReport(
+        database="db", table_count=0, total_rows=0, programmable_object_count=1,
+        findings=[], readiness_score=100,
+        severity_counts={"info": 0, "low": 0, "medium": 0, "high": 0},
+        tables=[], programmable_objects=[],
+    )
+
+
+def _project_with_validation():
+    from backend.projects.models import Project
+
+    plan = [{
+        "id": "procedure:dbo.usp_ItemReport", "kind": "procedure",
+        "name": "public.usp_ItemReport", "sql": FUNCTION_SQL,
+        "original": "CREATE PROCEDURE dbo.usp_ItemReport AS BEGIN SELECT * FROM dbo.Items; END",
+        "reasoning": "reshaped", "notes": "",
+    }]
+    # Validation still finds a *procedure* of that name in the target: the reshaped
+    # function did not replace it, so both exist.
+    validation = {
+        "source_database": "SourceDB",
+        "target_database": "databricks_postgres",
+        "target_schema": "public",
+        "items": [{
+            "id": "procedure:dbo.usp_ItemReport", "kind": "procedure",
+            "source_name": "dbo.usp_ItemReport", "target_name": "public.usp_ItemReport",
+            # Validation found a *procedure* while the plan created a function.
+            "target_kind": "procedure",
+            "status": "matched", "severity": "info",
+        }],
+    }
+    return Project(
+        id="11111111-1111-4111-8111-111111111111", name="p",
+        created_at="2026-01-01T00:00:00+00:00", updated_at="2026-01-01T00:00:00+00:00",
+        assessment=_report().model_dump(mode="json"), plan=plan, validation=validation,
+    )
+
+
+def test_the_bundle_refuses_to_promise_a_call_form_when_both_routines_exist():
+    """The plan records intent; only validation knows what is really there."""
+    bundle = build_bundle(_project_with_validation())
+
+    call = bundle.callables[0]
+    assert call.kind_conflict is True
+    assert "Do not rely on a call form" in call.call_change
+    assert "42809" in call.call_change
+
+
+def test_the_skill_cautions_about_the_duplicate_rather_than_choosing():
+    from backend.context_bundle.skill import render_skill
+
+    text = render_skill(build_bundle(_project_with_validation()))
+    assert "[!CAUTION]" in text
+    assert "exist in the target **twice**" in text
+    assert "`dbo.usp_ItemReport`" in text
