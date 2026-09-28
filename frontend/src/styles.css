@@ -558,6 +558,13 @@ a { color: var(--primary); }
 .planitem__name { font-weight: 600; font-size: 14px; flex: 1; }
 .planitem__body { padding: 4px 14px 14px; }
 .tag--kind { background: var(--primary-weak); color: var(--primary); text-transform: none; }
+/* A code object whose kind changed in the target — a procedure returning a result
+   set has to become a function. Outlined so it reads as a change at a glance,
+   against the plain kind tags on every other row. */
+.tag--reshaped {
+  background: var(--primary-weak); color: var(--primary); text-transform: none;
+  border: 1px solid rgba(34, 114, 180, 0.35); cursor: help; white-space: nowrap;
+}
 .sqlbox { width: 100%; min-height: 120px; font-family: ui-monospace, monospace; font-size: 12.5px; padding: 11px; border: 1px solid var(--border); border-radius: 8px; background: #fbfbfc; resize: vertical; }
 .sqlbox:focus { outline: none; border-color: var(--primary); }
 .orig { margin-top: 10px; }
