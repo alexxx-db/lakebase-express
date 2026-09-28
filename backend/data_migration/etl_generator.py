@@ -28,6 +28,7 @@ from __future__ import annotations
 from backend.data_migration.models import Artifact, DataGenRequest, PostLoadStatement, TableRef
 from backend.run_store import RUN_ID_PREFIX
 from backend.schema_migration.naming import map_object, map_schema
+from backend.schema_migration.routine_sql import with_kind_guard
 from backend.schema_migration.trigger_sql import sanitize_trigger_sql
 
 # --- Connection preamble injected into the generated notebook -------------------
@@ -807,14 +808,20 @@ def _snapshot_row(t: TableRef, target_schema: str, identifier_case="lowercase") 
 
 def _post_load_rows(statements: list[PostLoadStatement]) -> str:
     """POST_LOAD entries for one phase. repr() keeps arbitrary SQL (quotes, $$
-    bodies, newlines) a valid Python literal. Trigger SQL is sanitized here — at
-    emit time — so a stale/hand-edited plan (schema-qualified trigger name, no
-    OR REPLACE) still applies cleanly regardless of when it was built."""
+    bodies, newlines) a valid Python literal. The deterministic fix-ups run here —
+    at emit time — so a stale/hand-edited plan still applies cleanly regardless of
+    when it was built: trigger naming/OR REPLACE, and the stale-routine drop a
+    reshaped procedure needs (routine_sql)."""
     rows = []
     for s in statements:
         if not s.sql.strip():
             continue
-        sql = sanitize_trigger_sql(s.sql) if s.kind == "trigger" else s.sql
+        if s.kind == "trigger":
+            sql = sanitize_trigger_sql(s.sql)
+        elif s.kind in ("procedure", "function"):
+            sql = with_kind_guard(s.kind, s.sql)
+        else:
+            sql = s.sql
         rows.append(f"    ({s.name!r},\n     {sql!r})")
     return ",\n".join(rows)
 

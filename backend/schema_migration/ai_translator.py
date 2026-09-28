@@ -23,6 +23,7 @@ from typing import Callable
 
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
+from backend.assessment import callable_shape
 from backend.assessment.models import ProgrammableObject
 from backend.assessment.temp_objects import (
     REWRITES,
@@ -244,9 +245,15 @@ def translate_object(
         # applicable SQL, but it breaks on the pooled endpoint and the reviewer has
         # to be told rather than left to notice.
         notes = payload["notes"]
-        regression = temp_table_regression(obj.definition, translated)
-        if regression:
-            notes = f"{notes.rstrip()}\n\n{regression}" if notes.strip() else regression
+        for regression in (
+            temp_table_regression(obj.definition, translated),
+            # A row-returning procedure left as a Postgres PROCEDURE cannot be called
+            # for its rows at all, and the application cannot compensate — so it is
+            # reported here rather than discovered by whoever migrates the caller.
+            callable_shape.shape_regression(obj.object_type, obj.definition, translated),
+        ):
+            if regression:
+                notes = f"{notes.rstrip()}\n\n{regression}" if notes.strip() else regression
         return Translation(
             object_name=name,
             object_type=obj.object_type,

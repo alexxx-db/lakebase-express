@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
+from backend.assessment import callable_shape
 from backend.assessment.models import (
     Finding,
     ProgrammableObject,
@@ -268,6 +269,47 @@ def _evidence(group: list[TempUsage]) -> str:
     return "; ".join(f"{u.obj.name} ({u.reason})" for u in group)
 
 
+# --- Callable shape ----------------------------------------------------------------
+
+
+def check_result_set_procedures(
+    objects: Iterable[ProgrammableObject],
+) -> list[Finding]:
+    """Procedures whose caller reads rows, so they must become functions.
+
+    INFO, not a penalty: the translator does this reshaping on its own, and the
+    readiness score is meant to measure manual effort. It is reported because the
+    *call site* changes — `EXEC` becomes `SELECT * FROM`, never `CALL` — and an
+    application migrated on the assumption that a procedure stays a procedure fails
+    on every request with SQLSTATE 42809.
+    """
+    findings: list[Finding] = []
+    for obj in objects:
+        if obj.object_type.upper() != "PROCEDURE":
+            continue
+        if not callable_shape.returns_result_set(obj.definition):
+            continue
+        findings.append(
+            Finding(
+                rule_id="PROC_RETURNS_ROWS",
+                title="Procedure returns a result set → becomes a FUNCTION",
+                severity=Severity.INFO,
+                object_name=f"{obj.schema_name}.{obj.object_name} ({obj.object_type})",
+                detail=(
+                    "This procedure ends with a SELECT, so its caller reads rows back. A "
+                    "Postgres procedure cannot return a result set, so it is translated as "
+                    "CREATE FUNCTION ... RETURNS TABLE instead."
+                ),
+                recommendation=(
+                    "No schema work, but the call site changes: `EXEC` becomes "
+                    "`SELECT * FROM <name>(...)`. Calling it with `CALL` fails with "
+                    "SQLSTATE 42809."
+                ),
+            )
+        )
+    return findings
+
+
 # --- Collation compatibility -------------------------------------------------------
 
 # Operators Postgres refuses on a nondeterministic collation (NOT LIKE / NOT
@@ -410,4 +452,5 @@ def run_all_rules(
         + check_collations(tables)
         + check_code(objects)
         + check_temp_objects(tables, objects)
+        + check_result_set_procedures(objects)
     )
