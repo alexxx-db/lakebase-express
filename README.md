@@ -120,10 +120,54 @@ missing.
 | **Create Sync** | Sync now (in-app) or offload a re-runnable PySpark snapshot to a Databricks Job (run now, create unstarted, or schedule) |
 | **Validation** *(post-migration)* | Re-scan both sides and match every object — existence, structure, column collations, exact row counts, plus constraints, indexes, and foreign keys — then remediate with an autonomous AI repair agent, one-shot AI fixes, or manual SQL |
 | **Query Parity** *(post-migration)* | Generate N synthetic read-only queries, run each against both sides, and compare row count, result format, and performance — with a side-by-side result preview on any mismatch |
+| **App Migration Skill** *(post-migration)* | Export a drop-in `SKILL.md` describing how the database's contract with *application* code changed, for whoever migrates the app — an engineer or another AI agent |
 
 Target identifiers are lower-cased by default (PostgreSQL convention); a project
 can instead **preserve source casing** (double-quoted, case-sensitive). System
 objects (`sys`, `INFORMATION_SCHEMA`, `is_ms_shipped`, …) are never migrated.
+
+### App migration skill
+
+Migrating the database is only half the work: the application that talks to it
+has to move too. `GET /api/projects/{id}/context-skill` renders everything this
+tool learned into a **self-contained `SKILL.md`** — download it from the *App
+Migration Skill* module and drop it into another AI agent's skills directory
+(the module shows the path for Claude Code, Codex, Cursor, or anything else). No
+glue required.
+
+It carries what application code has to follow: the schema and identifier-casing
+rules every call site depends on, the columns whose value semantics changed, the
+columns where Postgres now rejects `LIKE`, how procedure and trigger call sites
+change, the T-SQL rewrite table applied to this database, what did not come
+across, and the deliberate trades a reader must *not* "fix". It deliberately says
+nothing about how to *connect* — how this tool reached Lakebase says nothing about
+how your application should — and carries no coordinates and no secret values, so
+it is safe to commit next to the code it describes.
+
+It is a **delta**, so anything absent round-trips unchanged, and changes are
+**grouped** ("these 45 columns reject `LIKE`") rather than listed per row, so a
+200-table database still produces a skill an agent reads in one pass. Long groups
+are capped and defer to `GET /api/projects/{id}/context-bundle`, the same context
+as JSON for scripts. Both render from stored state alone, so they can be exported
+at any phase and say up front what they cannot yet vouch for.
+
+Everything above is derived deterministically — no model writes it, which is what
+makes it safe to act on. One optional section is the exception: **model notes**
+(`POST /api/projects/{id}/context-notes`) hand each translated procedure, function,
+view and trigger to the configured Foundation Model together with its original
+T-SQL, and ask what changes for the code that *calls* it. That catches what no rule
+can — on a test database it found a function parameter shadowed by a column (so the
+filter silently matched every row) and an `UPDATE` setting a column to itself. The
+section names the endpoint that wrote it, says it is advisory, and says how many
+objects the model actually read. The pass takes minutes, so it runs in the
+background and the UI polls; once a run succeeds both exports carry its result, and
+a failure leaves the deterministic export intact.
+
+The AI migration *analysis* from the Assessment module is deliberately **not**
+included: it is produced before the plan exists, so it warns about risks the
+migration then handled and suggests approaches the migration deliberately rejected
+(citext, deterministic collations). In an artifact whose purpose is to stop a
+downstream agent contradicting those decisions, carrying it would do the opposite.
 
 ### Collations
 
@@ -576,9 +620,18 @@ cp .vscode/azure_sql.env.sample .vscode/azure_sql.env   # gitignored — fill it
 PYTHONPATH=. python3 scripts/azure_sql_connect.py --env-file .vscode/azure_sql.env
 ```
 
-To step through it in VS Code, use the **Azure SQL probe (env file)** launch
-configuration in `.vscode/launch.json`, which reads `.vscode/azure_sql.env` and
-pins the interpreter that has `pymssql` installed.
+To step through it in VS Code, copy the launch configurations first — the real
+`launch.json` is gitignored, since it holds your own workspace's profile and
+Lakebase coordinates:
+
+```bash
+cp .vscode/launch.json.sample .vscode/launch.json   # gitignored — fill in the <placeholders>
+```
+
+That gives you four configurations: the FastAPI backend under `debugpy`, Chrome
+against the Vite dev server, `pytest` on the current file, and **Azure SQL probe
+(env file)**, which reads `.vscode/azure_sql.env` and pins the interpreter that
+has `pymssql` installed.
 
 ## Roadmap
 

@@ -16,8 +16,10 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend import __version__
 from backend.api.assessment_routes import router as assessment_router
 from backend.api.data_routes import router as data_router
+from backend.api.context_routes import router as context_router
 from backend.api.databricks_routes import router as databricks_router
 from backend.api.migration_routes import router as migration_router
 from backend.api.projects_routes import router as projects_router
@@ -50,7 +52,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Lakebase Express", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Lakebase Express", version=__version__, lifespan=lifespan)
 
 # --- API routers (one per migration phase) ---------------------------------------
 app.include_router(assessment_router)
@@ -62,6 +64,7 @@ app.include_router(migration_router)
 app.include_router(validation_router)
 app.include_router(query_parity_router)
 app.include_router(projects_router)
+app.include_router(context_router)
 app.include_router(runs_router)
 app.include_router(databricks_router)
 

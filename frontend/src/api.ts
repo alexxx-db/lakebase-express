@@ -381,6 +381,9 @@ export interface ValidationItem {
   kind: ObjectKind;
   source_name: string;
   target_name: string;
+  /** What the object actually is in the target — not always its source kind, since a
+   * procedure returning a result set must be a function. "" when nothing was found. */
+  target_kind: string;
   status: MatchStatus;
   severity: Severity;
   detail: string;
@@ -530,6 +533,168 @@ export interface FmEndpointList {
   api?: string;
 }
 
+// --- App-migration context bundle ---
+// Mirrors backend/context_bundle/models.py 1:1. The bundle is a *delta*: only
+// what changed in the database's contract with application code is present, so
+// anything absent round-trips unchanged.
+
+export interface BundleProvenance {
+  generated_at: string;
+  project_id: string;
+  project_name: string;
+  bundle_version: string;
+  tool: string;
+  tool_version: string;
+  phase_statuses: Record<string, string>;
+  completeness: string[];
+}
+
+export interface BundleSection {
+  name: string;
+  count: number;
+  // Entries the delta filter left out, so a filtered section reads apart from an empty one.
+  omitted: number;
+  provenance: string; // deterministic | ai | user-edited | mixed
+  summary: string;
+}
+
+export interface BundleTarget {
+  target_schema: string;
+  identifier_case: string;
+  quoting_rule: string;
+  notes: string[];
+}
+
+export interface BundleNameChange {
+  kind: string;
+  source: string;
+  target: string;
+  note: string;
+}
+
+export interface BundleColumn {
+  table: string;
+  source_table: string;
+  column: string;
+  source_type: string;
+  target_type: string;
+  // Keys into ContextBundle.change_glossary.
+  changes: string[];
+  collation?: string | null;
+  deterministic: boolean;
+  rejects_pattern_match: boolean;
+}
+
+export interface BundleCallable {
+  object_type: string;
+  target_kind: string;
+  returns_set: boolean;
+  source_returns_result_set: boolean;
+  kind_conflict: boolean;
+  source: string;
+  target: string;
+  call_change: string;
+  translated: boolean;
+  provenance: string;
+  companion_function: string;
+  note: string;
+}
+
+export interface BundleExpression {
+  item_id: string;
+  kind: string;
+  target_object: string;
+  source_expr: string;
+  target_expr: string;
+  passed_through: boolean;
+  risk: string;
+}
+
+export interface BundleRewriteRule {
+  tsql: string;
+  postgres: string;
+  severity: string;
+  seen_in_source: boolean;
+  affected_objects: string[];
+}
+
+export interface BundleGap {
+  id: string;
+  title: string;
+  severity: string;
+  origin: string;
+  detail: string;
+  recommendation: string;
+  affected: string[];
+}
+
+export interface BundleOperational {
+  transient_sqlstates: string[];
+  retry_note: string;
+  identity_note: string;
+  deliberate_trades: string[];
+  notes: string[];
+}
+
+export interface BundleSourceSummary {
+  table_count: number;
+  total_rows: number;
+  programmable_object_count: number;
+  tables_selected_for_data: number;
+  readiness_score: number;
+  severity_counts: Record<string, number>;
+  score_formula: string;
+}
+
+export interface AiObjectNote {
+  source: string;
+  object_type: string;
+  /** Digest of the translated SQL this note describes; stale notes are dropped. */
+  sql_digest: string;
+  call_site: string;
+  behaviour: string;
+  watch_out: string;
+}
+
+// The one model-written part of the export, labelled with the endpoint that wrote
+// it. Fail-soft: success=false carries the reason instead of throwing.
+export interface AiNotes {
+  endpoint: string;
+  /** ISO-8601 UTC when the model wrote them; "" for notes stored before this existed. */
+  generated_at: string;
+  /** Notes dropped because they described SQL that has since changed. */
+  stale_dropped: number;
+  notes: AiObjectNote[];
+  success: boolean;
+  error?: string | null;
+}
+
+export interface AiNotesRunState {
+  run_id: string;
+  status: string; // running|success|failed
+  endpoint: string;
+  objects_total: number;
+  notes?: AiNotes | null;
+  error?: string | null;
+}
+
+export interface ContextBundle {
+  start_here: string;
+  provenance: BundleProvenance;
+  sections: BundleSection[];
+  source_summary: BundleSourceSummary;
+  target: BundleTarget;
+  change_glossary: Record<string, string>;
+  names: BundleNameChange[];
+  columns: BundleColumn[];
+  callables: BundleCallable[];
+  expressions: BundleExpression[];
+  rewrite_rules: BundleRewriteRule[];
+  gaps: BundleGap[];
+  operational: BundleOperational;
+  ai_notes?: AiNotes | null;
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(path, {
     method: "POST",
@@ -547,6 +712,12 @@ async function get<T>(path: string): Promise<T> {
   const res = await fetch(path);
   if (!res.ok) throw new Error(res.statusText);
   return res.json() as Promise<T>;
+}
+
+async function getText(path: string): Promise<string> {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(res.statusText);
+  return res.text();
 }
 
 async function send<T>(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<T> {
@@ -781,4 +952,21 @@ export const api = {
   getProject: (id: string) => get<Project>(`/api/projects/${id}`),
   updateProject: (id: string, project: Project) => send<Project>("PUT", `/api/projects/${id}`, project),
   deleteProject: (id: string) => send<{ ok: boolean }>("DELETE", `/api/projects/${id}`),
+
+  // --- App-migration context ---
+  // Both are built server-side from the *saved* project, so flush any pending
+  // autosave first. The skill is the artifact people hand over; the JSON is the
+  // machine-readable source behind it (and holds the lists the skill groups).
+  // Both carry the newest successful model-notes run, if there is one.
+  contextSkill: (id: string) => getText(`/api/projects/${id}/context-skill`),
+  contextBundle: (id: string) => get<ContextBundle>(`/api/projects/${id}/context-bundle`),
+  // The model reads every translated object, which takes minutes — past the Apps
+  // request timeout — so it runs in the background and the UI polls.
+  startContextNotes: (id: string, endpoint?: string) =>
+    post<{ run_id: string }>(
+      `/api/projects/${id}/context-notes${endpoint ? `?endpoint=${encodeURIComponent(endpoint)}` : ""}`,
+      {},
+    ),
+  contextNotesStatus: (id: string, runId: string) =>
+    get<AiNotesRunState>(`/api/projects/${id}/context-notes/status/${runId}`),
 };
