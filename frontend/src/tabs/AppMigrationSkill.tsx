@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type ContextBundle } from "../api";
 import CodeBlock from "../components/CodeBlock";
 import CopyButton from "../components/CopyButton";
@@ -143,6 +143,24 @@ export default function AppMigrationSkill({ projectId, onSave, fmEndpoint }: Pro
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
+  // The notes are most of what makes the skill worth handing over, and asking for them
+  // by hand meant most exports simply went without. They are generated on first open
+  // instead, then reused by every later export — so this fires at most once per project
+  // per mount, and only when there is nothing to reuse and something to read. A failed
+  // run is not retried automatically: that would burn a model call per visit.
+  const autoStarted = useRef<string | null>(null);
+  useEffect(() => {
+    if (busy || thinking || !bundle) return;
+    if (bundle.ai_notes?.success) return;
+    if (autoStarted.current === projectId) return;
+    // Nothing translated yet — the model would have nothing to read, and the backend
+    // would answer with an error the user did not ask for.
+    if (!bundle.callables.some((c) => c.translated)) return;
+    autoStarted.current = projectId;
+    addNotes();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bundle, busy, thinking, projectId]);
+
   const selected = AGENTS.find((a) => a.id === agent) ?? AGENTS[0];
   const notes = bundle?.ai_notes ?? null;
   // Notes are generated once and replayed on every export, so their age is the only
@@ -255,10 +273,9 @@ export default function AppMigrationSkill({ projectId, onSave, fmEndpoint }: Pro
         {!notes?.success && !busy && (
           <>
             <p className="muted">
-              Optional: a model can read each translated procedure beside its original and add
-              what changes for the code that calls it — it catches things no rule can, like a
-              parameter shadowed by a column. Added as a separate advisory section; everything
-              else stays derived from the migration itself. Takes a few minutes.
+              {thinking
+                ? "A model is reading each translated procedure beside its original to add what changes for the code that calls it — it catches things no rule can, like a parameter shadowed by a column. This runs once and every later export reuses it; you can leave this page."
+                : "A model reads each translated procedure beside its original and adds what changes for the code that calls it, as a separate advisory section — everything else stays derived from the migration itself. It runs on its own the first time there is something translated to read."}
             </p>
             <ModelBadge endpoint={llm}
               title="The Foundation Model that would write the notes — change it in Settings." />
