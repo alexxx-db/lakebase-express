@@ -121,6 +121,7 @@ missing.
 | **Validation** *(post-migration)* | Re-scan both sides and match every object — existence, structure, column collations, exact row counts, plus constraints, indexes, and foreign keys — then remediate with an autonomous AI repair agent, one-shot AI fixes, or manual SQL |
 | **Query Parity** *(post-migration)* | Generate N synthetic read-only queries, run each against both sides, and compare row count, result format, and performance — with a side-by-side result preview on any mismatch |
 | **App Migration Skill** *(post-migration)* | Export a drop-in `SKILL.md` describing how the database's contract with *application* code changed, for whoever migrates the app — an engineer or another AI agent |
+| **Migration Report** *(post-migration)* | Export the whole audit cycle — assessment, plan, what the run copied, validation, query parity — as one printable HTML/PDF report to hand to the client (the Assessment module exports the scan on its own) |
 
 Target identifiers are lower-cased by default (PostgreSQL convention); a project
 can instead **preserve source casing** (double-quoted, case-sensitive). System
@@ -168,6 +169,73 @@ included: it is produced before the plan exists, so it warns about risks the
 migration then handled and suggests approaches the migration deliberately rejected
 (citext, deterministic collations). In an artifact whose purpose is to stop a
 downstream agent contradicting those decisions, carrying it would do the opposite.
+
+### Migration report
+
+The audit deliverable: `GET /api/projects/{id}/report` renders the whole cycle —
+assessment, plan, what the run actually copied, validation, query parity — as **one
+self-contained HTML page**, downloadable from the *Migration Report* module. There
+is no external stylesheet, font, or script, so it can be emailed, committed, or
+opened offline years later.
+
+**The PDF is the browser's own print output** (the page carries a *Save as PDF*
+button, and a print stylesheet with A4 page setup, repeating table headers, and
+page breaks that never split a finding in half). Rendering it server-side would mean
+WeasyPrint or wkhtmltopdf — system libraries the Databricks Apps container does not
+carry — for a worse result than the print engine already in the reader's browser.
+
+Sections run in the order the work happened, and **every one is rendered even when
+its phase never ran**, because a missing heading reads as a phase that passed. For
+the same reason a score whose phase never ran prints *Not run* rather than `0`, and
+the report opens with **what it cannot vouch for** — validation not run, row counts
+taken by planner estimate, run history held in memory, and the fact that applying
+the plan is not recorded anywhere, so Validation is the only evidence of what
+reached the target.
+
+**What it deliberately leaves out.** The report is built to be emailed and committed, so
+it is a summary, not a dump of the project row. It carries no password and no secret
+scope/key reference, and no connecting identity — not the source username, not the
+Lakebase role. It carries no SQL: not a source object's T-SQL, not the translated
+PL/pgSQL, not a validation fix, not a generated parity query. Above all it carries **no
+row data**: query parity samples real rows from both databases to compare them, and
+neither the previews nor the differing cells are read — only which *columns* disagreed.
+Database error text is cut to its primary message, because Postgres appends a `DETAIL`
+line to a constraint violation that names the offending key values, or prints the whole
+failing row; the full text stays in the app. What it does carry, by design, is the source
+and target **host and database name** plus the target schema — that is the audit trail of
+what moved where, and it is the one reason to treat the file as internal to the customer
+who owns that infrastructure.
+
+It is derived entirely from what the phases stored: no source or target connection
+is opened and no model is called, so a report costs nothing to produce and is
+reproducible from the project row plus its run history. Rows are counted as they
+landed — a table that failed was copied in one transaction and committed nothing, so
+its progress is not counted, and a run that resumed another is counted once.
+Unlike the app-migration skill, this one *does* carry the AI assessment (labelled
+with the endpoint that wrote it, and as written before the plan existed): the report
+is a record of what each phase produced, not instructions for an agent to follow.
+
+Long enumerations are capped, always report their true size, and say that the project
+itself — not the JSON export, which carries the same caps — holds the rest. A 1.6 MB
+project row with 250 tables and 900 findings renders a 172 KB report.
+`GET /api/projects/{id}/report-data` is the same report as JSON, for machine consumers.
+
+**`?scope=assessment` narrows either route to the source scan alone**, which is what the
+Assessment module's download icon produces — readiness, what was scanned, every finding,
+and the AI analysis, for the stage where there is no plan, no load and nothing compared
+yet. The icon sits at the right of the AI analysis panel's footer and goes straight to
+the print dialog (the report is loaded into an offscreen frame and printed), so the one
+step is *Save as PDF*; the document title becomes the suggested filename. A section outside the scope is `null` rather than empty,
+so "not part of this artifact" cannot read as "nothing found"; the sole section is
+unnumbered, since `1.` implies a sequence; no phase the scope excludes gets a *Not run*
+tile, which would answer a question the artifact never asked; and the caveats are about
+the scan — its age, and that **source row counts come from the source's partition
+statistics rather than `COUNT(*)`, so they are approximate**. It reads no run history, so
+it costs a single project read. Anything else is a 422 rather than a silent full export.
+
+`scripts/preview_report.py` renders a fully-populated example without a workspace or
+a database, for iterating on the print layout (`--serve` seeds it into a throwaway
+store and runs the app).
 
 ### Collations
 

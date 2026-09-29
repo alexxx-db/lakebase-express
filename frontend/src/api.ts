@@ -695,6 +695,110 @@ export interface ContextBundle {
   ai_notes?: AiNotes | null;
 }
 
+// --- Migration report (mirrors backend/report/models.py) ---
+
+export interface ReportProvenance {
+  generated_at: string;
+  project_id: string;
+  project_name: string;
+  report_version: string;
+  tool: string;
+  tool_version: string;
+  phase_statuses: Record<string, string>;
+  /** What the report cannot vouch for; silence would read as success. */
+  completeness: string[];
+}
+
+export interface ReportCoordinates {
+  source_type: string;
+  source_host: string;
+  source_database: string;
+  target_host: string;
+  target_database: string;
+  target_schema: string;
+  identifier_case: string;
+}
+
+// null on a score means its phase never ran, which is not the same as zero.
+export interface ReportHeadline {
+  readiness_score: number | null;
+  tables: number;
+  total_rows: number;
+  programmable_objects: number;
+  tables_selected: number;
+  plan_items: number;
+  rows_copied: number | null;
+  match_score: number | null;
+  parity_score: number | null;
+}
+
+export interface ReportAssessment {
+  database: string;
+  readiness_score: number;
+  severity_counts: Record<string, number>;
+  table_count: number;
+  total_rows: number;
+  programmable_object_count: number;
+  findings_total: number;
+  ai?: AIAssessment | null;
+}
+
+export interface ReportPlan {
+  total: number;
+  by_kind: Record<string, number>;
+  pre_data: number;
+  post_data: number;
+  collations: string[];
+  code_objects_total: number;
+  translated: number;
+  user_edited: number;
+  not_translated: number;
+}
+
+export interface ReportResult {
+  runs_total: number;
+  rows_copied: number;
+  tables_loaded: number;
+  /** False when run history lives in process memory, i.e. a restart emptied it. */
+  history_persistent: boolean;
+}
+
+export interface ReportValidation {
+  match_score: number;
+  matched: number;
+  missing: number;
+  mismatched: number;
+  extra: number;
+  row_delta: number;
+  outstanding_total: number;
+}
+
+export interface ReportParity {
+  parity_score: number;
+  total: number;
+  matched: number;
+  mismatched: number;
+  errored: number;
+  speedup: number | null;
+}
+
+// How much of the cycle an export covers. "assessment" is the source scan alone.
+export type ReportScope = "full" | "assessment";
+
+/** A section is null when its phase never ran, or when the scope leaves it out. Only
+ *  the fields the modules show are typed here; the HTML export carries the rest. */
+export interface MigrationReport {
+  scope: ReportScope;
+  provenance: ReportProvenance;
+  coordinates: ReportCoordinates;
+  headline: ReportHeadline;
+  assessment?: ReportAssessment | null;
+  plan?: ReportPlan | null;
+  result?: ReportResult | null;
+  validation?: ReportValidation | null;
+  parity?: ReportParity | null;
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(path, {
     method: "POST",
@@ -969,4 +1073,16 @@ export const api = {
     ),
   contextNotesStatus: (id: string, runId: string) =>
     get<AiNotesRunState>(`/api/projects/${id}/context-notes/status/${runId}`),
+
+  // --- Migration report ---
+  // Also built from the *saved* project. The HTML is the deliverable (one
+  // self-contained file the browser prints to PDF); the JSON is the same report for
+  // machine consumers, and what the modules read to summarise it. `scope=assessment`
+  // narrows both to the source scan, for exporting from the Assessment module.
+  migrationReportUrl: (id: string, scope: ReportScope = "full") =>
+    `/api/projects/${id}/report?scope=${scope}`,
+  migrationReportHtml: (id: string, scope: ReportScope = "full") =>
+    getText(`/api/projects/${id}/report?scope=${scope}`),
+  migrationReport: (id: string, scope: ReportScope = "full") =>
+    get<MigrationReport>(`/api/projects/${id}/report-data?scope=${scope}`),
 };
