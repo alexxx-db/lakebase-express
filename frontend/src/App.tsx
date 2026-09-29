@@ -15,6 +15,7 @@ import DataMigration from "./tabs/DataMigration";
 import CreateSync from "./tabs/CreateSync";
 import ValidationModule from "./tabs/ValidationModule";
 import AppMigrationSkill from "./tabs/AppMigrationSkill";
+import MigrationReport from "./tabs/MigrationReport";
 import QueryParityModule from "./tabs/QueryParityModule";
 
 // What the phase components consume. Derived from the persisted Project plus the
@@ -274,6 +275,7 @@ function ProjectWorkspace({ project, setProject, secretsRef, forceRender, fmEndp
     // stored artifact, so there is nothing to derive "done" from. It used to key off
     // an assessment existing, which claimed done on a module the user never opened.
     skill: false,
+    report: false,
   };
   const meta = MODULES.find((m) => m.id === module)!;
   const goConnection = () => setModule("connection");
@@ -319,13 +321,14 @@ function ProjectWorkspace({ project, setProject, secretsRef, forceRender, fmEndp
               workspaceHost={workspace?.host}
             />
           )}
-          {module === "assessment" && <AssessmentModule state={state} setState={setState} goConnection={goConnection} fmEndpoint={fmEndpoint} />}
+          {module === "assessment" && <AssessmentModule state={state} setState={setState} goConnection={goConnection} fmEndpoint={fmEndpoint} projectId={project.id} onSave={saveNow} />}
           {module === "schema" && <SchemaCode state={state} setState={setState} fmEndpoint={fmEndpoint} />}
           {module === "data" && <DataMigration state={state} setState={setState} onGoConnection={goConnection} onContinue={() => setModule("sync")} />}
           {module === "sync" && <CreateSync state={state} onGoConnection={goConnection} onGoSchema={() => setModule("schema")} onGoData={() => setModule("data")} onGoValidation={() => setModule("validation")} workspace={workspace} onManageWorkspace={onManageWorkspace} />}
           {module === "validation" && <ValidationModule state={state} setState={setState} goConnection={goConnection} fmEndpoint={fmEndpoint} />}
           {module === "parity" && <QueryParityModule state={state} setState={setState} goConnection={goConnection} goAssessment={() => setModule("assessment")} fmEndpoint={fmEndpoint} />}
           {module === "skill" && <AppMigrationSkill projectId={project.id} onSave={saveNow} fmEndpoint={fmEndpoint} />}
+          {module === "report" && <MigrationReport projectId={project.id} onSave={saveNow} />}
 
           {module !== "overview" && (
             <div className="stepnav">
