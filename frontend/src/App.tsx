@@ -270,8 +270,10 @@ function ProjectWorkspace({ project, setProject, secretsRef, forceRender, fmEndp
     sync: false,
     validation: !!state.validation,
     parity: !!state.queryParity,
-    // Exportable as soon as there is an assessment to describe.
-    skill: !!state.report,
+    // Never ticks, like overview and sync: this module produces a download, not a
+    // stored artifact, so there is nothing to derive "done" from. It used to key off
+    // an assessment existing, which claimed done on a module the user never opened.
+    skill: false,
   };
   const meta = MODULES.find((m) => m.id === module)!;
   const goConnection = () => setModule("connection");
