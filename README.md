@@ -1,5 +1,7 @@
 # Lakebase Express
 
+[![CI](https://github.com/databricks-solutions/lakebase-express/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/databricks-solutions/lakebase-express/actions/workflows/ci.yml)
+
 A Databricks App that guides you through migrating a transactional database to
 **Databricks Lakebase** (managed serverless Postgres), through a connector
 catalog. It's a **migration engine, not a code generator**: you review and edit
